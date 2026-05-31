@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>euv</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #fff; }
+    #loading {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: #fff; z-index: 9999;
+    }
+    #loading.hidden { display: none; }
+    .spinner {
+      width: 40px; height: 40px; border: 3px solid #e0e0e0;
+      border-top-color: #333; border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loading-text { margin-top: 16px; font-size: 14px; color: #999; font-family: system-ui, sans-serif; }
+    #retry-btn {
+      display: none; margin-top: 20px; padding: 10px 32px;
+      background: #333; color: #fff; border: none; border-radius: 6px;
+      font-size: 14px; cursor: pointer; font-family: system-ui, sans-serif;
+    }
+    #retry-btn.visible { display: inline-block; }
+    #frame {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      border: none; display: none; z-index: 1;
+    }
+    #frame.visible { display: block; }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div class="spinner" id="spinner"></div>
+    <div id="loading-text">加载中...</div>
+    <button id="retry-btn">点击重试</button>
+  </div>
+  <iframe id="frame"
+    allow="autoplay; camera; microphone; geolocation; fullscreen"
+    sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-modals">
+  </iframe>
+
+  <script type="module">
+    import { invoke } from '@tauri-apps/api/core';
+
+    const loadingEl = document.getElementById('loading');
+    const spinnerEl = document.getElementById('spinner');
+    const loadingTextEl = document.getElementById('loading-text');
+    const retryBtn = document.getElementById('retry-btn');
+    const frame = document.getElementById('frame');
+
+    function showLoading(text, withRetry) {
+      loadingEl.classList.remove('hidden');
+      frame.classList.remove('visible');
+      loadingTextEl.textContent = text || '加载中...';
+      spinnerEl.style.display = withRetry ? 'none' : 'block';
+      retryBtn.classList.toggle('visible', !!withRetry);
+    }
+
+    function showContent(html) {
+      frame.srcdoc = html;
+      frame.classList.add('visible');
+      loadingEl.classList.add('hidden');
+    }
+
+    async function loadResource() {
+      showLoading('加载中...', false);
+      try {
+        const result = await invoke('load_cached_resource');
+        if (result && result.content) {
+          console.log('[euv] Content loaded, from cache:', result.from_cache);
+          showContent(result.content);
+        } else {
+          showLoading('加载失败，请重试', true);
+        }
+      } catch (error) {
+        console.error('[euv] Load failed:', error);
+        showLoading('加载失败，请重试', true);
+      }
+    }
+
+    retryBtn.addEventListener('click', () => {
+      console.log('[euv] Retry clicked');
+      showLoading('重新加载中...', false);
+      setTimeout(loadResource, 100);
+    });
+
+    loadResource();
+  </script>
+</body>
+</html>

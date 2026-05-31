@@ -1,0 +1,6 @@
+*.log
+*.pid
+/data
+/target
+/.vscode
+node_modules

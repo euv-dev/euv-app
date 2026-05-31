@@ -1,0 +1,10 @@
+{
+  "name": "euv",
+  "version": "0.1.0",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.0"
+  }
+}
