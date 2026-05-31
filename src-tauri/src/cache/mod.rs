@@ -6,5 +6,3 @@ mod r#static;
 mod r#struct;
 
 pub use {r#const::*, r#enum::*, r#fn::*, r#struct::*};
-
-use serde::Serialize;

@@ -1,6 +1,4 @@
-use super::*;
-
-use tauri::Manager;
+use crate::*;
 
 /// Reads the cached HTML content from the local file system.
 ///
@@ -10,10 +8,15 @@ use tauri::Manager;
 /// # Returns
 /// - `Result<String, CacheError>`: The cached HTML string on success, or a `CacheError` on failure.
 pub async fn read_cache(app_handle: &tauri::AppHandle) -> Result<String, CacheError> {
-    let cache_dir: std::path::PathBuf = app_handle.path().app_data_dir().map_err(|error: tauri::Error| CacheError::Read(format!("{}", error)))?;
+    let cache_dir: std::path::PathBuf = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|error: tauri::Error| CacheError::Read(format!("{}", error)))?;
     let cache_path: std::path::PathBuf = cache_dir.join(CACHE_FILENAME);
     if cache_path.exists() {
-        let content: String = tokio::fs::read_to_string(&cache_path).await.map_err(|error: std::io::Error| CacheError::Read(format!("{}", error)))?;
+        let content: String = tokio::fs::read_to_string(&cache_path)
+            .await
+            .map_err(|error: std::io::Error| CacheError::Read(format!("{}", error)))?;
         log::info!("[cache] Read cached content, size: {} bytes", content.len());
         return Ok(content);
     }
@@ -30,11 +33,21 @@ pub async fn read_cache(app_handle: &tauri::AppHandle) -> Result<String, CacheEr
 /// # Returns
 /// - `Result<(), CacheError>`: Ok on success, or a `CacheError` on failure.
 pub async fn write_cache(app_handle: &tauri::AppHandle, content: &str) -> Result<(), CacheError> {
-    let cache_dir: std::path::PathBuf = app_handle.path().app_data_dir().map_err(|error: tauri::Error| CacheError::Write(format!("{}", error)))?;
-    tokio::fs::create_dir_all(&cache_dir).await.map_err(|error: std::io::Error| CacheError::Write(format!("{}", error)))?;
+    let cache_dir: std::path::PathBuf = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|error: tauri::Error| CacheError::Write(format!("{}", error)))?;
+    tokio::fs::create_dir_all(&cache_dir)
+        .await
+        .map_err(|error: std::io::Error| CacheError::Write(format!("{}", error)))?;
     let cache_path: std::path::PathBuf = cache_dir.join(CACHE_FILENAME);
-    tokio::fs::write(&cache_path, content).await.map_err(|error: std::io::Error| CacheError::Write(format!("{}", error)))?;
-    log::info!("[cache] Cached content written, size: {} bytes", content.len());
+    tokio::fs::write(&cache_path, content)
+        .await
+        .map_err(|error: std::io::Error| CacheError::Write(format!("{}", error)))?;
+    log::info!(
+        "[cache] Cached content written, size: {} bytes",
+        content.len()
+    );
     Ok(())
 }
 
@@ -47,13 +60,23 @@ pub async fn fetch_remote() -> Result<String, CacheError> {
         .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
         .build()
         .map_err(|error: reqwest::Error| CacheError::Fetch(format!("{}", error)))?;
-    let response: reqwest::Response = client.get(REMOTE_URL).send().await.map_err(|error: reqwest::Error| CacheError::Fetch(format!("{}", error)))?;
+    let response: reqwest::Response = client
+        .get(REMOTE_URL)
+        .send()
+        .await
+        .map_err(|error: reqwest::Error| CacheError::Fetch(format!("{}", error)))?;
     let status: reqwest::StatusCode = response.status();
     if !status.is_success() {
         return Err(CacheError::Fetch(format!("HTTP status: {}", status)));
     }
-    let content: String = response.text().await.map_err(|error: reqwest::Error| CacheError::Fetch(format!("{}", error)))?;
-    log::info!("[cache] Fetched remote content, size: {} bytes", content.len());
+    let content: String = response
+        .text()
+        .await
+        .map_err(|error: reqwest::Error| CacheError::Fetch(format!("{}", error)))?;
+    log::info!(
+        "[cache] Fetched remote content, size: {} bytes",
+        content.len()
+    );
     Ok(content)
 }
 
@@ -66,12 +89,18 @@ pub async fn fetch_remote() -> Result<String, CacheError> {
 /// - `Result<LoadResult, CacheError>`: A `LoadResult` containing the content and its source.
 pub async fn load_resource(app_handle: &tauri::AppHandle) -> Result<LoadResult, CacheError> {
     match read_cache(app_handle).await {
-        Ok(content) => Ok(LoadResult { content, from_cache: true }),
+        Ok(content) => Ok(LoadResult {
+            content,
+            from_cache: true,
+        }),
         Err(_) => {
             log::info!("[cache] Cache miss, fetching from remote...");
             let content: String = fetch_remote().await?;
             let _ = write_cache(app_handle, &content).await;
-            Ok(LoadResult { content, from_cache: false })
+            Ok(LoadResult {
+                content,
+                from_cache: false,
+            })
         }
     }
 }
@@ -92,7 +121,10 @@ pub async fn update_cache_async(app_handle: tauri::AppHandle) {
             }
         }
         Err(error) => {
-            log::error!("[cache] Failed to fetch remote content for update: {}", error);
+            log::error!(
+                "[cache] Failed to fetch remote content for update: {}",
+                error
+            );
         }
     }
 }
@@ -106,5 +138,7 @@ pub async fn update_cache_async(app_handle: tauri::AppHandle) {
 /// - `Result<LoadResult, String>`: A `LoadResult` containing the content and its source, or an error message.
 #[tauri::command]
 pub async fn load_cached_resource(app_handle: tauri::AppHandle) -> Result<LoadResult, String> {
-    load_resource(&app_handle).await.map_err(|error: CacheError| format!("{}", error))
+    load_resource(&app_handle)
+        .await
+        .map_err(|error: CacheError| format!("{}", error))
 }

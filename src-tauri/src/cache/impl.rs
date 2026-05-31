@@ -1,4 +1,4 @@
-use super::*;
+use crate::*;
 
 /// Implements Display trait for CacheError.
 impl std::fmt::Display for CacheError {

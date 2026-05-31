@@ -1,10 +1,8 @@
-//! App Lib
-//!
-//! Tauri application with resource caching for fast startup.
-
 mod cache;
 
-pub use {cache::load_cached_resource, cache::update_cache_async};
+use cache::*;
+
+use {serde::Serialize, tauri::Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

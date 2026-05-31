@@ -1,4 +1,4 @@
-use super::*;
+use crate::*;
 
 /// Represents the result of loading a cached or remote resource.
 #[derive(Serialize)]
