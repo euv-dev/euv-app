@@ -16,8 +16,8 @@ open class BuildTask : DefaultTask() {
 
     @TaskAction
     fun assemble() {
-        // Rust libs are already compiled by `tauri android build --ci`.
-        // Skip recompilation to avoid WebSocket connection issues when running Gradle directly.
+        // Rust libs already compiled by `tauri android build --ci`.
+        // Skip recompilation to avoid WebSocket connection issues.
         project.logger.info("Skipping Rust build (already compiled): target=$target release=$release")
     }
 }

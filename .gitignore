@@ -4,3 +4,16 @@
 /target
 /.vscode
 node_modules
+
+# Build artifacts
+gen/android/build/
+gen/android/.gradle/
+gen/android/app/build/
+gen/android/app/src/main/assets/
+src-tauri/target/
+*.apk
+*.aab
+keystore.jks
+keystore.properties
+local.properties
+build.ps1
