@@ -6,6 +6,7 @@
 
 package com.euv
 
+import android.content.Intent
 import android.net.Uri
 import android.webkit.*
 import android.content.Context
@@ -15,7 +16,9 @@ import android.os.Looper
 import android.util.Log
 import androidx.webkit.WebViewAssetLoader
 import java.io.ByteArrayInputStream
+import java.io.BufferedInputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
@@ -23,7 +26,7 @@ import java.security.MessageDigest
 import java.util.zip.GZIPInputStream
 import kotlin.concurrent.thread
 
-class RustWebViewClient(webView: RustWebView, context: Context): WebViewClient() {
+class RustWebViewClient(webView: RustWebView, private val context: Context): WebViewClient() {
     private val interceptedState = mutableMapOf<String, Boolean>()
     var currentUrl: String = "about:blank"
     private var lastInterceptedUrl: Uri? = null
@@ -41,8 +44,18 @@ class RustWebViewClient(webView: RustWebView, context: Context): WebViewClient()
     private val MAX_REDIRECTS = 10
     private val assetDomain: String = Rust.assetLoaderDomain(webView.id)
     private val webViewId: String = webView.id
-    // The base URL of the remote page (set after first fetch resolves redirects)
-    @Volatile private var remoteBaseUrl: String = "https://ltpp.vip/static/euv/"
+    // The base URL of the remote page (restored from cache or default)
+    @Volatile private var remoteBaseUrl: String = try {
+        val f = File(File(context.cacheDir, "euv_web_cache"), "base_url.txt")
+        if (f.exists()) f.readText().trim() else "https://ltpp.vip/static/euv/"
+    } catch (_: Exception) { "https://ltpp.vip/static/euv/" }
+    // Track if background refresh already started this session (avoid duplicate refreshes)
+    private val refreshedUrls = mutableSetOf<String>()
+    // Track if main frame has been loaded (prevent WASM app from triggering reload)
+    // Use companion object so it persists across WebViewClient recreations
+    companion object {
+        @Volatile private var mainFrameLoaded = false
+    }
 
     private fun debugLog(msg: String) {
         try {
@@ -78,22 +91,37 @@ class RustWebViewClient(webView: RustWebView, context: Context): WebViewClient()
             return assetLoader.shouldInterceptRequest(request.url)
         }
 
-        // Main frame request to tauri.localhost → serve remote page content via cache
+        // Main frame request to tauri.localhost → serve optimized bootstrap HTML directly
         if (host == "tauri.localhost" && isMainFrame && url == "http://tauri.localhost/") {
-            debugLog(">>> MAIN-FRAME tauri.localhost → fetching remote page via cache")
-            try {
-                val remoteUrl = "https://ltpp.vip/euv"
-                val cached = serveCachedOrFetchMainPage(remoteUrl)
-                if (cached != null) {
-                    debugLog(">>> MAIN-FRAME served from cache/network, remoteBaseUrl=$remoteBaseUrl")
-                    interceptedState[url] = true
-                    return cached
-                }
-                debugLog(">>> MAIN-FRAME cache returned null, falling back to Rust")
-            } catch (e: Exception) {
-                debugLog(">>> MAIN-FRAME exception: ${e.message}")
+            // If main frame already loaded, this is a reload triggered by WASM app — block it
+            if (mainFrameLoaded) {
+                debugLog(">>> MAIN-FRAME BLOCKED (already loaded, preventing WASM-triggered reload)")
+                return WebResourceResponse(
+                    "text/html", "utf-8", 200, "OK",
+                    mapOf("Cache-Control" to "no-store"),
+                    ByteArrayInputStream("<!-- blocked reload -->".toByteArray())
+                )
             }
-            // Fall through to Rust handler if cache fails
+            debugLog(">>> MAIN-FRAME serving optimized bootstrap HTML")
+            interceptedState[url] = true
+            mainFrameLoaded = true
+            // Trigger background refresh of remote resources
+            if (refreshedUrls.add("https://ltpp.vip/euv")) {
+                thread {
+                    try {
+                        val result = fetchAndStoreWithFinalUrl("https://ltpp.vip/euv")
+                        if (result != null) {
+                            remoteBaseUrl = result.baseUrl
+                            File(cacheDir, "base_url.txt").writeText(result.baseUrl)
+                            debugLog("MAIN-BG-OK baseUrl=${result.baseUrl}")
+                        }
+                    } catch (e: Exception) {
+                        debugLog("MAIN-BG-FAIL: ${e.message}")
+                    }
+                }
+            }
+            // Return optimized HTML immediately — no disk I/O, no cache lookup needed
+            return generateOptimizedHtml()
         }
 
         // Tauri internal domains: sub-resources → map to remote URL and cache
@@ -177,33 +205,36 @@ class RustWebViewClient(webView: RustWebView, context: Context): WebViewClient()
             debugLog("MAIN-HIT $url (${dataFile.length()}B)")
             val contentType = metaFile.readText()
             val mimeType = extractMimeType(contentType)
-            val encoding = extractEncoding(contentType)
+            val encoding = extractEncoding(contentType) ?: "utf-8"
             // Restore base URL from saved file
             if (baseFile.exists()) {
                 remoteBaseUrl = baseFile.readText()
                 debugLog("MAIN-HIT restored baseUrl=$remoteBaseUrl")
             }
 
-            // Background refresh
-            thread {
-                try {
-                    val result = fetchAndStoreWithFinalUrl(url)
-                    if (result != null) {
-                        remoteBaseUrl = result.baseUrl
-                        baseFile.writeText(result.baseUrl)
-                        debugLog("MAIN-BG-OK baseUrl=${result.baseUrl}")
+            // Background refresh (only once per session)
+            if (refreshedUrls.add(url)) {
+                thread {
+                    try {
+                        val result = fetchAndStoreWithFinalUrl(url)
+                        if (result != null) {
+                            remoteBaseUrl = result.baseUrl
+                            baseFile.writeText(result.baseUrl)
+                            debugLog("MAIN-BG-OK baseUrl=${result.baseUrl}")
+                        }
+                    } catch (e: Exception) {
+                        debugLog("MAIN-BG-FAIL: ${e.message}")
                     }
-                } catch (e: Exception) {
-                    debugLog("MAIN-BG-FAIL: ${e.message}")
                 }
             }
 
-            val bytes = dataFile.readBytes()
+            // Stream directly from file
+            val inputStream = BufferedInputStream(FileInputStream(dataFile), 65536)
             val headers = mutableMapOf(
                 "Access-Control-Allow-Origin" to "*",
                 "Cache-Control" to "no-store"
             )
-            return WebResourceResponse(mimeType, encoding ?: "utf-8", 200, "OK", headers, ByteArrayInputStream(bytes))
+            return WebResourceResponse(mimeType, encoding, 200, "OK", headers, inputStream)
         } else {
             debugLog("MAIN-MISS $url")
             val result = fetchAndStoreWithFinalUrl(url)
@@ -236,24 +267,27 @@ class RustWebViewClient(webView: RustWebView, context: Context): WebViewClient()
             debugLog("HIT $url (${dataFile.length()}B)")
             val contentType = metaFile.readText()
             val mimeType = extractMimeType(contentType)
-            val encoding = extractEncoding(contentType)
+            val encoding = if (isBinaryMime(mimeType)) null else (extractEncoding(contentType) ?: "utf-8")
 
-            // Background refresh
-            thread {
-                try {
-                    fetchAndStore(url)
-                    debugLog("BG-OK $url")
-                } catch (e: Exception) {
-                    debugLog("BG-FAIL $url: ${e.message}")
+            // Background refresh (only once per session)
+            if (refreshedUrls.add(url)) {
+                thread {
+                    try {
+                        fetchAndStore(url)
+                        debugLog("BG-OK $url")
+                    } catch (e: Exception) {
+                        debugLog("BG-FAIL $url: ${e.message}")
+                    }
                 }
             }
 
-            val bytes = dataFile.readBytes()
+            // Stream directly from file — avoids loading entire file into memory
+            val inputStream = BufferedInputStream(FileInputStream(dataFile), 65536)
             val headers = mutableMapOf(
                 "Access-Control-Allow-Origin" to "*",
                 "Cache-Control" to "no-store"
             )
-            return WebResourceResponse(mimeType, encoding ?: "utf-8", 200, "OK", headers, ByteArrayInputStream(bytes))
+            return WebResourceResponse(mimeType, encoding, 200, "OK", headers, inputStream)
         } else {
             debugLog("MISS $url")
             val result = fetchAndStore(url)
@@ -262,13 +296,13 @@ class RustWebViewClient(webView: RustWebView, context: Context): WebViewClient()
                 return null
             }
             val mimeType = extractMimeType(result.contentType)
-            val encoding = extractEncoding(result.contentType)
+            val encoding = if (isBinaryMime(mimeType)) null else (extractEncoding(result.contentType) ?: "utf-8")
             val headers = mutableMapOf(
                 "Access-Control-Allow-Origin" to "*",
                 "Cache-Control" to "no-store"
             )
             debugLog("MISS-SERVED $url (${result.data.size}B, $mimeType)")
-            return WebResourceResponse(mimeType, encoding ?: "utf-8", 200, "OK", headers, ByteArrayInputStream(result.data))
+            return WebResourceResponse(mimeType, encoding, 200, "OK", headers, ByteArrayInputStream(result.data))
         }
     }
 
@@ -384,10 +418,64 @@ class RustWebViewClient(webView: RustWebView, context: Context): WebViewClient()
         }
     }
 
+    /**
+     * Generate an optimized bootstrap HTML that:
+     * 1. Starts WASM fetch + compile immediately (no waiting for module script parsing)
+     * 2. Loads JS in parallel
+     * 3. Uses instantiateStreaming for fastest possible WASM compilation
+     * 4. Shows no loading text, just a spinner
+     *
+     * This completely replaces the remote HTML with a faster-loading equivalent.
+     */
+    private fun generateOptimizedHtml(): WebResourceResponse {
+        val html = """<!DOCTYPE html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>Euv</title>
+<style>
+body{margin:0;padding:0;background:#fff}
+._s{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:#fff;z-index:99999;transition:opacity .3s}
+._sp{width:36px;height:36px;border:3px solid #e0e0e0;border-top-color:#1890ff;border-radius:50%;animation:_r .8s linear infinite}
+@keyframes _r{to{transform:rotate(360deg)}}
+</style>
+</head><body>
+<div class="_s" id="_s"><div class="_sp"></div></div>
+<div id="app"></div>
+<script>
+// Start WASM compilation immediately — don't wait for JS module to load
+var wasmReady = WebAssembly.compileStreaming(fetch('./pkg/euv_bg.wasm'));
+// Load JS module in parallel
+import('./pkg/euv.js').then(function(mod) {
+    return wasmReady.then(function(compiled) {
+        return mod.default(compiled);
+    }).then(function() {
+        mod.main();
+    });
+});
+// Remove spinner when app renders
+new MutationObserver(function(m,o){
+    var a=document.getElementById('app');
+    if(a&&a.children.length>0){
+        var s=document.getElementById('_s');
+        if(s){s.style.opacity='0';setTimeout(function(){s.remove()},300)}
+        o.disconnect();
+    }
+}).observe(document.body,{childList:true,subtree:true});
+</script>
+</body></html>"""
+
+        val bytes = html.toByteArray(Charsets.UTF_8)
+        val headers = mutableMapOf(
+            "Access-Control-Allow-Origin" to "*",
+            "Cache-Control" to "no-store"
+        )
+        return WebResourceResponse("text/html", "utf-8", 200, "OK", headers, ByteArrayInputStream(bytes))
+    }
+
     private fun getCacheFile(url: String) = File(cacheDir, "${sha256(url)}${extOf(url)}")
     private fun getMetaFile(url: String) = File(cacheDir, "${sha256(url)}.meta")
     private fun extractMimeType(ct: String) = ct.split(";").firstOrNull()?.trim() ?: "application/octet-stream"
     private fun extractEncoding(ct: String): String? = ct.split(";").find { it.trim().startsWith("charset=", true) }?.substringAfter("=")?.trim()
+    private fun isBinaryMime(mime: String): Boolean = mime.startsWith("application/wasm") || mime.startsWith("application/octet") || mime.startsWith("image/") || mime.startsWith("audio/") || mime.startsWith("video/")
     private fun extOf(url: String): String {
         return try { val p = URL(url).path; val d = p.lastIndexOf('.'); val s = p.lastIndexOf('/')
             if (d > s && d < p.length - 1) { val e = p.substring(d); if (e.length <= 10) e else "" } else ""
@@ -403,9 +491,25 @@ class RustWebViewClient(webView: RustWebView, context: Context): WebViewClient()
         request: WebResourceRequest
     ): Boolean {
         val url = request.url.toString()
-        val result = Rust.shouldOverride((view as RustWebView).id, url)
-        debugLog(">>> shouldOverrideUrlLoading url=$url result=$result")
-        return result
+        val host = request.url.host ?: ""
+        debugLog(">>> shouldOverrideUrlLoading url=$url host=$host")
+
+        // Allow tauri internal navigation
+        if (host == "tauri.localhost" || url.startsWith("tauri://")) {
+            val result = Rust.shouldOverride((view as RustWebView).id, url)
+            return result
+        }
+
+        // All other links open in external browser
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+            debugLog(">>> Opened in external browser: $url")
+        } catch (e: Exception) {
+            debugLog(">>> Failed to open external browser: ${e.message}")
+        }
+        return true  // Prevent WebView from loading the URL
     }
 
     override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
@@ -423,6 +527,48 @@ class RustWebViewClient(webView: RustWebView, context: Context): WebViewClient()
     override fun onPageFinished(view: WebView, url: String) {
         debugLog(">>> onPageFinished url=$url")
         Rust.onPageLoaded((view as RustWebView).id, url)
+        // Inject a script that waits for WASM app to render, then removes native splash
+        if (url == "http://tauri.localhost/") {
+            view.evaluateJavascript("""
+                (function() {
+                    function checkReady() {
+                        var app = document.getElementById('app');
+                        if (app && app.children.length > 0) {
+                            window.__SPLASH_READY = true;
+                            return;
+                        }
+                        new MutationObserver(function(m, o) {
+                            var app = document.getElementById('app');
+                            if (app && app.children.length > 0) {
+                                window.__SPLASH_READY = true;
+                                o.disconnect();
+                            }
+                        }).observe(document.body || document.documentElement, {childList: true, subtree: true});
+                    }
+                    checkReady();
+                })();
+            """.trimIndent(), null)
+            // Poll for WASM render completion to remove native splash
+            val handler = Handler(Looper.getMainLooper())
+            val pollRunnable = object : Runnable {
+                override fun run() {
+                    view.evaluateJavascript("window.__SPLASH_READY === true") { result ->
+                        if (result == "true") {
+                            debugLog(">>> WASM rendered, removing native splash")
+                            (context as? MainActivity)?.removeSplash()
+                        } else {
+                            handler.postDelayed(this, 200)
+                        }
+                    }
+                }
+            }
+            handler.postDelayed(pollRunnable, 500)
+            // Fallback: remove splash after 15s max
+            handler.postDelayed({
+                debugLog(">>> Splash timeout, force removing")
+                (context as? MainActivity)?.removeSplash()
+            }, 15000)
+        }
     }
 
     override fun onReceivedError(

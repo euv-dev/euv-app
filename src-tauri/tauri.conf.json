@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "euv",
+  "productName": "Euv",
   "version": "0.1.0",
   "identifier": "com.euv",
   "build": {
@@ -11,7 +11,7 @@
   "app": {
     "windows": [
       {
-        "title": "EUV",
+        "title": "Euv",
         "width": 1280,
         "height": 800,
         "resizable": true,
