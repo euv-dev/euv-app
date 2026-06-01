@@ -33,7 +33,7 @@ android {
     }
     signingConfigs {
         create("release") {
-            storeFile = file("C:/Users/14915/Desktop/euv-app/keystore.jks")
+            storeFile = file("../../../../keystore.jks")
             storePassword = "euv123456"
             keyAlias = "euv"
             keyPassword = "euv123456"
