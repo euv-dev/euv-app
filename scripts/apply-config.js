@@ -2,13 +2,13 @@
 /**
  * apply-config.js
  *
- * 读取 app.config.json，将配置注入到各平台的配置文件中：
+ * Reads app.config.json and injects configuration into platform-specific files:
  * - tauri.conf.json
  * - dist/index.html
  * - Android strings.xml
  * - Android AppConfig.kt
  *
- * 用法: node scripts/apply-config.js
+ * Usage: node scripts/apply-config.js
  */
 
 const fs = require('fs');
@@ -86,16 +86,21 @@ function getLoadingHtml(config) {
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>${config.app.name}</title>
 <style>body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:${bg}}
-@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
-.loader{width:48px;height:48px;border:5px solid ${trackColor};border-top:5px solid ${spinnerColor};border-radius:50%;animation:spin 0.8s linear infinite}
+.loader{width:48px;height:48px}
 </style>
-</head><body><div class="loader"></div></body></html>`;
+</head><body><svg class="loader" viewBox="0 0 50 50" xmlns="http://www.w3.org/2000/svg"><circle cx="25" cy="25" r="20" fill="none" stroke="${trackColor}" stroke-width="4"/><circle cx="25" cy="25" r="20" fill="none" stroke="${spinnerColor}" stroke-width="4" stroke-linecap="round" stroke-dasharray="80 200" stroke-dashoffset="0"><animateTransform attributeName="transform" type="rotate" from="0 25 25" to="360 25 25" dur="1s" repeatCount="indefinite"/></circle></svg></body></html>`;
 }
 
 /**
  * Generate the index.html that Tauri loads as the frontend entry point.
- * Includes splash screen with the actual project logo (base64 inlined) + spinner,
- * then navigates to the remote URL.
+ *
+ * Flow:
+ * 1. Show splash/loading screen
+ * 2. Invoke `load_cached_resource` to check if local cache exists
+ * 3. If cache exists → navigate to euv://localhost/index.html (custom protocol serves from cache)
+ * 4. If no cache → show loading spinner while waiting, Rust background task fetches and saves
+ *    → poll every 1s until cache becomes available, then navigate
+ *
  * Can be overridden by setting ui.indexHtml in app.config.json.
  */
 function getIndexHtml(config) {
@@ -120,6 +125,9 @@ function getIndexHtml(config) {
     logoDataUri = 'data:image/png;base64,' + iconBase64;
   }
 
+  // Determine the custom protocol URL based on platform
+  // Windows/Android: https://euv.localhost/index.html
+  // macOS/iOS/Linux: euv://localhost/index.html
   return `<!doctype html>
 <html>
   <head>
@@ -134,7 +142,6 @@ function getIndexHtml(config) {
         display: flex; flex-direction: column; align-items: center; justify-content: center;
         background: ${bg}; z-index: 99999;
         transition: opacity ${fadeDuration}ms ease-out;
-        /* Extend into safe areas */
         padding-top: env(safe-area-inset-top);
         padding-bottom: env(safe-area-inset-bottom);
         padding-left: env(safe-area-inset-left);
@@ -148,16 +155,8 @@ function getIndexHtml(config) {
         width: 100%; height: 100%;
         object-fit: contain;
       }
-      @keyframes spin {
-        0% { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
-      }
       .loader {
-        width: 36px; height: 36px;
-        border: 3px solid ${trackColor};
-        border-top: 3px solid ${spinnerColor};
-        border-radius: 50%;
-        animation: spin 0.8s linear infinite;
+        width: 40px; height: 40px;
       }
       #app { width: 100%; height: 100%; }
     </style>
@@ -167,22 +166,61 @@ function getIndexHtml(config) {
       <div id="splash-logo">
         <img src="${logoDataUri}" alt="${config.app.name}" />
       </div>
-      <div class="loader"></div>
+      <svg class="loader" viewBox="0 0 50 50" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="25" cy="25" r="20" fill="none" stroke="${trackColor}" stroke-width="4" />
+        <circle cx="25" cy="25" r="20" fill="none" stroke="${spinnerColor}" stroke-width="4" stroke-linecap="round" stroke-dasharray="80 200" stroke-dashoffset="0">
+          <animateTransform attributeName="transform" type="rotate" from="0 25 25" to="360 25 25" dur="1s" repeatCount="indefinite" />
+        </circle>
+      </svg>
     </div>
     <div id="app"></div>
     <script>
       (function() {
-        var REMOTE_URL = '${config.remote.url}';
         var FADE_DURATION = ${fadeDuration};
-        function removeSplash() {
+        var POLL_INTERVAL = 1000;
+
+        function getSchemeUrl(path) {
+          var ua = navigator.userAgent || navigator.platform || '';
+          var isWindowsOrAndroid = /Win|Android/.test(ua);
+          return isWindowsOrAndroid
+            ? 'https://euv.localhost/' + path
+            : 'euv://localhost/' + path;
+        }
+
+        function navigateToCache() {
+          var url = getSchemeUrl('index.html');
+          window.location.replace(url);
+        }
+
+        function removeSplashAndNavigate() {
           var s = document.getElementById('splash');
           if (s) {
             s.classList.add('fade-out');
             setTimeout(function() { s.remove(); }, FADE_DURATION);
           }
+          setTimeout(navigateToCache, 50);
         }
-        removeSplash();
-        setTimeout(function() { window.location.replace(REMOTE_URL); }, FADE_DURATION);
+
+        var pollCount = 0;
+
+        function pollForCache() {
+          window.__TAURI_INTERNALS__.invoke('load_cached_resource')
+            .then(function(result) {
+              if (result && result.from_cache) {
+                removeSplashAndNavigate();
+              } else {
+                pollCount++;
+                var delay = pollCount < 3 ? 500 : POLL_INTERVAL;
+                setTimeout(pollForCache, delay);
+              }
+            })
+            .catch(function(err) {
+              console.warn('[EUV] load_cached_resource error:', err);
+              setTimeout(pollForCache, POLL_INTERVAL);
+            });
+        }
+
+        pollForCache();
       })();
     </script>
   </body>

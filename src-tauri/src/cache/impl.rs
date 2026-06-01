@@ -9,3 +9,5 @@ impl std::fmt::Display for CacheError {
         }
     }
 }
+
+impl std::error::Error for CacheError {}

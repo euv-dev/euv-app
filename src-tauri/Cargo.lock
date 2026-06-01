@@ -876,13 +876,16 @@ dependencies = [
 name = "euv-app"
 version = "0.1.0"
 dependencies = [
+ "http",
  "log",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-log",
+ "tokio",
  "url",
 ]
 
