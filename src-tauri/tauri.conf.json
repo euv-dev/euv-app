@@ -6,7 +6,7 @@
   "build": {
     "frontendDist": "../dist",
     "beforeDevCommand": "",
-    "beforeBuildCommand": ""
+    "beforeBuildCommand": "node scripts/apply-config.js"
   },
   "app": {
     "windows": [

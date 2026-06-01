@@ -36,12 +36,16 @@ class MainActivity : TauriActivity() {
         } catch (e: Exception) {
             Log.d("EUV_CACHE", "mainFrameLoaded field not found (expected on vanilla Tauri)")
         }
-        // Set window background to white BEFORE super.onCreate to avoid black flash
-        window.setBackgroundDrawable(ColorDrawable(Color.WHITE))
+        // Set window background BEFORE super.onCreate to avoid black flash
+        window.setBackgroundDrawable(ColorDrawable(Color.parseColor(AppConfig.BACKGROUND_COLOR)))
         super.onCreate(savedInstanceState)
-        enableImmersiveMode()
+        if (AppConfig.IMMERSIVE_MODE) {
+            enableImmersiveMode()
+        }
         // Start foreground service to keep app alive in background
-        startKeepAliveService()
+        if (AppConfig.KEEP_ALIVE_SERVICE) {
+            startKeepAliveService()
+        }
     }
 
     private fun startKeepAliveService() {
@@ -61,7 +65,7 @@ class MainActivity : TauriActivity() {
     private fun addSplashOverlay() {
         val rootView = window.decorView as ViewGroup
         val splash = FrameLayout(this).apply {
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(Color.parseColor(AppConfig.BACKGROUND_COLOR))
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -88,7 +92,7 @@ class MainActivity : TauriActivity() {
         splashView?.let { splash ->
             splash.animate()
                 .alpha(0f)
-                .setDuration(300)
+                .setDuration(AppConfig.SPLASH_FADE_DURATION_MS)
                 .withEndAction {
                     (splash.parent as? ViewGroup)?.removeView(splash)
                     splashView = null
@@ -128,7 +132,7 @@ class MainActivity : TauriActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) {
+        if (hasFocus && AppConfig.IMMERSIVE_MODE) {
             enableImmersiveMode()
         }
     }
@@ -161,8 +165,8 @@ class MainActivity : TauriActivity() {
 
         // Enable hardware acceleration on the WebView
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-        // Set WebView background to white
-        webView.setBackgroundColor(Color.WHITE)
+        // Set WebView background
+        webView.setBackgroundColor(Color.parseColor(AppConfig.BACKGROUND_COLOR))
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onConsoleMessage(msg: ConsoleMessage): Boolean {

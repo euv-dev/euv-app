@@ -37,29 +37,29 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
         .addPathHandler("/", WebViewAssetLoader.AssetsPathHandler(context))
         .build()
 
-    // ===== Offline cache =====
+    // ===== Offline cache (values from AppConfig) =====
     private val TAG = "EUV_CACHE"
-    private val cacheDir = File(context.cacheDir, "euv_web_cache").also { it.mkdirs() }
+    private val cacheDir = File(context.cacheDir, AppConfig.CACHE_DIR).also { it.mkdirs() }
     private val debugFile = File(context.cacheDir, "euv_debug.log")
-    private val MAX_REDIRECTS = 10
+    private val MAX_REDIRECTS = AppConfig.MAX_REDIRECTS
     private val assetDomain: String = Rust.assetLoaderDomain(webView.id)
     private val webViewId: String = webView.id
     // Timeouts: shorter for cache-hit background refresh, longer only for cold miss
-    private val CONNECT_TIMEOUT_FAST = 5_000  // 5s for background refresh
-    private val READ_TIMEOUT_FAST = 8_000     // 8s for background refresh
-    private val CONNECT_TIMEOUT_MISS = 15_000 // 15s for cache miss (must wait)
-    private val READ_TIMEOUT_MISS = 20_000    // 20s for cache miss
+    private val CONNECT_TIMEOUT_FAST = AppConfig.CONNECT_TIMEOUT_FAST
+    private val READ_TIMEOUT_FAST = AppConfig.READ_TIMEOUT_FAST
+    private val CONNECT_TIMEOUT_MISS = AppConfig.CONNECT_TIMEOUT_MISS
+    private val READ_TIMEOUT_MISS = AppConfig.READ_TIMEOUT_MISS
     // The base URL of the remote page (restored from cache or default)
     @Volatile private var remoteBaseUrl: String = try {
-        val f = File(File(context.cacheDir, "euv_web_cache"), "base_url.txt")
-        if (f.exists()) f.readText().trim() else "https://ltpp.vip/static/euv/"
-    } catch (_: Exception) { "https://ltpp.vip/static/euv/" }
+        val f = File(File(context.cacheDir, AppConfig.CACHE_DIR), "base_url.txt")
+        if (f.exists()) f.readText().trim() else AppConfig.REMOTE_BASE_URL
+    } catch (_: Exception) { AppConfig.REMOTE_BASE_URL }
     // Track if background refresh already started this session (avoid duplicate refreshes)
     private val refreshedUrls = mutableSetOf<String>()
     // In-memory cache for prefetched resources (avoids disk I/O on hot path)
     private val memoryCache = java.util.concurrent.ConcurrentHashMap<String, Pair<ByteArray, String>>()
     // Known critical sub-resources to prefetch in parallel after main page cache hit
-    private val CRITICAL_SUBRESOURCES = listOf("pkg/euv.js", "pkg/euv_bg.wasm")
+    private val CRITICAL_SUBRESOURCES = AppConfig.CRITICAL_SUBRESOURCES
     // Track if main frame has been loaded (prevent WASM app from triggering reload)
     // Use companion object so it persists across WebViewClient recreations
     companion object {
@@ -120,7 +120,7 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
             interceptedState[url] = true
             mainFrameLoaded = true
             // Fetch the remote page (follows redirects), cache it, serve from cache
-            val mainPageResponse = serveCachedOrFetchMainPage("https://ltpp.vip/euv")
+            val mainPageResponse = serveCachedOrFetchMainPage(AppConfig.REMOTE_URL)
             if (mainPageResponse != null) {
                 return mainPageResponse
             }
@@ -134,7 +134,7 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
                     attempt++
                     try { Thread.sleep(2000) } catch (_: Exception) {}
                     debugLog(">>> AUTO-RETRY attempt #$attempt")
-                    val result = fetchAndStoreWithFinalUrl("https://ltpp.vip/euv")
+                    val result = fetchAndStoreWithFinalUrl(AppConfig.REMOTE_URL)
                     if (result != null) {
                         remoteBaseUrl = result.baseUrl
                         try { File(cacheDir, "base_url.txt").writeText(result.baseUrl) } catch (_: Exception) {}
@@ -147,14 +147,7 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
                 }
                 debugLog(">>> AUTO-RETRY gave up after $attempt attempts")
             }
-            val fallbackHtml = """<!DOCTYPE html><html><head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<style>body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#fff}
-@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
-.loader{width:48px;height:48px;border:5px solid #e0e0e0;border-top:5px solid #1677ff;border-radius:50%;animation:spin 0.8s linear infinite}
-</style>
-</head><body><div class="loader"></div></body></html>"""
+            val fallbackHtml = AppConfig.LOADING_HTML
             val bytes = fallbackHtml.toByteArray(Charsets.UTF_8)
             val headers = mutableMapOf("Cache-Control" to "no-store")
             return WebResourceResponse("text/html", "utf-8", 200, "OK", headers, ByteArrayInputStream(bytes))
@@ -615,10 +608,10 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
             }
             // Start polling immediately (no initial delay)
             handler.post(pollRunnable)
-            // Fallback: remove splash after 5s max (was 8s)
+            // Fallback: remove splash after max wait time
             handler.postDelayed({
                 (context as? MainActivity)?.removeSplash()
-            }, 5000)
+            }, AppConfig.SPLASH_MAX_WAIT_MS)
         }
     }
 

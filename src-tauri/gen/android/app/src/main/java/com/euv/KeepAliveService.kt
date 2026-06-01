@@ -18,7 +18,7 @@ import android.util.Log
 class KeepAliveService : Service() {
 
     private val TAG = "EUV_KEEPALIVE"
-    private val CHANNEL_ID = "euv_keep_alive"
+    private val CHANNEL_ID = AppConfig.NOTIFICATION_CHANNEL_ID
     private val NOTIFICATION_ID = 1001
     private var wakeLock: PowerManager.WakeLock? = null
 
@@ -47,7 +47,7 @@ class KeepAliveService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "后台运行",
+                AppConfig.NOTIFICATION_CHANNEL_NAME,
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "保持应用后台运行"
@@ -75,8 +75,8 @@ class KeepAliveService : Service() {
         }
 
         return builder
-            .setContentTitle("EUV")
-            .setContentText("运行中")
+            .setContentTitle(AppConfig.NOTIFICATION_TITLE)
+            .setContentText(AppConfig.NOTIFICATION_TEXT)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .setOngoing(true)

@@ -1,0 +1,82 @@
+{
+  "$schema": "./app.config.schema.json",
+  "app": {
+    "name": "Euv",
+    "identifier": "com.euv",
+    "version": "0.1.0",
+    "description": "Euv App",
+    "author": "you"
+  },
+  "remote": {
+    "url": "https://ltpp.vip/euv",
+    "baseUrl": "https://ltpp.vip/static/euv/",
+    "criticalResources": [
+      "pkg/euv.js",
+      "pkg/euv_bg.wasm"
+    ]
+  },
+  "cache": {
+    "directory": "euv_web_cache",
+    "fetchTimeoutSecs": 30,
+    "maxBodySizeBytes": 10485760,
+    "connectTimeoutFastMs": 5000,
+    "readTimeoutFastMs": 8000,
+    "connectTimeoutMissMs": 15000,
+    "readTimeoutMissMs": 20000,
+    "maxRedirects": 10
+  },
+  "ui": {
+    "backgroundColor": "#FFFFFF",
+    "loadingSpinnerColor": "#1677ff",
+    "loadingSpinnerTrackColor": "#e0e0e0",
+    "splashFadeDurationMs": 300,
+    "splashMaxWaitMs": 5000,
+    "immersiveMode": true,
+    "loadingHtml": "",
+    "indexHtml": "",
+    "window": {
+      "title": "Euv",
+      "width": 1280,
+      "height": 800,
+      "resizable": true,
+      "fullscreen": false
+    }
+  },
+  "android": {
+    "namespace": "com.euv",
+    "minSdk": 24,
+    "targetSdk": 36,
+    "compileSdk": 36,
+    "keepAliveService": true,
+    "notification": {
+      "channelId": "euv_keep_alive",
+      "channelName": "后台运行",
+      "title": "EUV",
+      "text": "运行中"
+    }
+  },
+  "ios": {
+    "bundleIdentifier": "com.euv",
+    "deploymentTarget": "14.0",
+    "teamId": ""
+  },
+  "icons": {
+    "source": "src-tauri/icons/icon.png",
+    "android": {
+      "foreground": "src-tauri/gen/android/app/src/main/res/drawable-v24/ic_launcher_foreground.xml",
+      "background": "src-tauri/gen/android/app/src/main/res/drawable/ic_launcher_background.xml"
+    }
+  },
+  "build": {
+    "targets": [
+      "android",
+      "ios"
+    ],
+    "signing": {
+      "android": {
+        "keystorePath": "keystore.jks",
+        "keystoreAlias": "euv"
+      }
+    }
+  }
+}
