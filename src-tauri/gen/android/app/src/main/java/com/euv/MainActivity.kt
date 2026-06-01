@@ -1,5 +1,6 @@
 package com.euv
 
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
@@ -39,6 +40,18 @@ class MainActivity : TauriActivity() {
         window.setBackgroundDrawable(ColorDrawable(Color.WHITE))
         super.onCreate(savedInstanceState)
         enableImmersiveMode()
+        // Start foreground service to keep app alive in background
+        startKeepAliveService()
+    }
+
+    private fun startKeepAliveService() {
+        val serviceIntent = Intent(this, KeepAliveService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent)
+        } else {
+            startService(serviceIntent)
+        }
+        Log.d("EUV_CACHE", "KeepAliveService started")
     }
 
     /**
