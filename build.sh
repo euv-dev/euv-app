@@ -68,9 +68,16 @@ else
 fi
 
 if [ -f "$APK_PATH" ]; then
-    APK_SIZE=$(du -h "$APK_PATH" | cut -f1)
+    # 复制 APK 到项目根目录
+    if [ "$MODE" = "release" ]; then
+        OUTPUT_NAME="euv-release.apk"
+    else
+        OUTPUT_NAME="euv-debug.apk"
+    fi
+    cp "$APK_PATH" "$OUTPUT_NAME"
+    APK_SIZE=$(du -h "$OUTPUT_NAME" | cut -f1)
     info "构建完成! 耗时 ${BUILD_DURATION}s"
-    info "产物路径: $APK_PATH"
+    info "产物路径: ./$OUTPUT_NAME"
     info "文件大小: $APK_SIZE"
 else
     warn "构建可能完成，但未在预期路径找到 APK"
