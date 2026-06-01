@@ -70,7 +70,7 @@ fi
 if [ -f "$APK_PATH" ]; then
     # 复制 APK 到项目根目录
     if [ "$MODE" = "release" ]; then
-        OUTPUT_NAME="euv-release.apk"
+        OUTPUT_NAME="euv.apk"
     else
         OUTPUT_NAME="euv-debug.apk"
     fi
