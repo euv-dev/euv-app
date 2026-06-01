@@ -26,6 +26,8 @@ class MainActivity : TauriActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         Log.d("EUV_CACHE", "MainActivity.onCreate()")
+        // Reset WebViewClient state so the main frame can load again after process reuse
+        RustWebViewClient.resetMainFrameState()
         // Set window background to white BEFORE super.onCreate to avoid black flash
         window.setBackgroundDrawable(ColorDrawable(Color.WHITE))
         super.onCreate(savedInstanceState)

@@ -55,6 +55,11 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
     // Use companion object so it persists across WebViewClient recreations
     companion object {
         @Volatile private var mainFrameLoaded = false
+
+        /** Reset state when Activity is (re-)created so cold/warm starts work correctly. */
+        fun resetMainFrameState() {
+            mainFrameLoaded = false
+        }
     }
 
     private fun debugLog(msg: String) {
