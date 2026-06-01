@@ -131,8 +131,23 @@ class MainActivity : TauriActivity() {
             allowUniversalAccessFromFileURLs = true
             allowFileAccess = true
             domStorageEnabled = true
+            // Performance optimizations for faster WASM/JS execution
+            javaScriptEnabled = true
+            // Enable hardware acceleration for WebView rendering
+            @Suppress("DEPRECATION")
+            setRenderPriority(android.webkit.WebSettings.RenderPriority.HIGH)
+            // Reduce layout algorithm overhead
+            @Suppress("DEPRECATION")
+            layoutAlgorithm = android.webkit.WebSettings.LayoutAlgorithm.NORMAL
+            // Disable unnecessary features that slow down loading
+            blockNetworkImage = false
+            loadsImagesAutomatically = true
+            // Cache mode: load from cache when available
+            cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
         }
 
+        // Enable hardware acceleration on the WebView
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         // Set WebView background to white
         webView.setBackgroundColor(Color.WHITE)
 

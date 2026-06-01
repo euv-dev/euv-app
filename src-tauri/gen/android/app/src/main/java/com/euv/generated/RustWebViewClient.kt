@@ -44,6 +44,11 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
     private val MAX_REDIRECTS = 10
     private val assetDomain: String = Rust.assetLoaderDomain(webView.id)
     private val webViewId: String = webView.id
+    // Timeouts: shorter for cache-hit background refresh, longer only for cold miss
+    private val CONNECT_TIMEOUT_FAST = 5_000  // 5s for background refresh
+    private val READ_TIMEOUT_FAST = 8_000     // 8s for background refresh
+    private val CONNECT_TIMEOUT_MISS = 15_000 // 15s for cache miss (must wait)
+    private val READ_TIMEOUT_MISS = 20_000    // 20s for cache miss
     // The base URL of the remote page (restored from cache or default)
     @Volatile private var remoteBaseUrl: String = try {
         val f = File(File(context.cacheDir, "euv_web_cache"), "base_url.txt")
@@ -51,6 +56,10 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
     } catch (_: Exception) { "https://ltpp.vip/static/euv/" }
     // Track if background refresh already started this session (avoid duplicate refreshes)
     private val refreshedUrls = mutableSetOf<String>()
+    // In-memory cache for prefetched resources (avoids disk I/O on hot path)
+    private val memoryCache = java.util.concurrent.ConcurrentHashMap<String, Pair<ByteArray, String>>()
+    // Known critical sub-resources to prefetch in parallel after main page cache hit
+    private val CRITICAL_SUBRESOURCES = listOf("pkg/euv.js", "pkg/euv_bg.wasm")
     // Track if main frame has been loaded (prevent WASM app from triggering reload)
     // Use companion object so it persists across WebViewClient recreations
     companion object {
@@ -115,14 +124,37 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
             if (mainPageResponse != null) {
                 return mainPageResponse
             }
-            // If both cache and network fail, serve a minimal error/retry page
-            debugLog(">>> MAIN-FRAME no cache and no network, serving fallback")
+            // If both cache and network fail, serve loading page and retry in background
+            debugLog(">>> MAIN-FRAME no cache and no network, serving loading + auto-retry")
+            mainFrameLoaded = false  // Allow reload after retry succeeds
+            // Background retry loop
+            thread {
+                var attempt = 0
+                while (attempt < 60) { // retry up to ~60 times (~2 min)
+                    attempt++
+                    try { Thread.sleep(2000) } catch (_: Exception) {}
+                    debugLog(">>> AUTO-RETRY attempt #$attempt")
+                    val result = fetchAndStoreWithFinalUrl("https://ltpp.vip/euv")
+                    if (result != null) {
+                        remoteBaseUrl = result.baseUrl
+                        try { File(cacheDir, "base_url.txt").writeText(result.baseUrl) } catch (_: Exception) {}
+                        debugLog(">>> AUTO-RETRY SUCCESS at attempt #$attempt, reloading WebView")
+                        Handler(Looper.getMainLooper()).post {
+                            view.loadUrl("http://tauri.localhost/")
+                        }
+                        return@thread
+                    }
+                }
+                debugLog(">>> AUTO-RETRY gave up after $attempt attempts")
+            }
             val fallbackHtml = """<!DOCTYPE html><html><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<style>body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#fff;color:#333}
-.c{text-align:center}button{margin-top:20px;padding:12px 24px;font-size:16px;border:none;border-radius:8px;background:#1677ff;color:#fff}</style>
-</head><body><div class="c"><p>网络不可用，请检查网络连接后重试</p><button onclick="location.reload()">重试</button></div></body></html>"""
+<style>body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#fff}
+@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
+.loader{width:48px;height:48px;border:5px solid #e0e0e0;border-top:5px solid #1677ff;border-radius:50%;animation:spin 0.8s linear infinite}
+</style>
+</head><body><div class="loader"></div></body></html>"""
             val bytes = fallbackHtml.toByteArray(Charsets.UTF_8)
             val headers = mutableMapOf("Cache-Control" to "no-store")
             return WebResourceResponse("text/html", "utf-8", 200, "OK", headers, ByteArrayInputStream(bytes))
@@ -219,11 +251,11 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
                 debugLog("MAIN-HIT restored baseUrl=$remoteBaseUrl")
             }
 
-            // Background refresh (only once per session)
+            // Background refresh (only once per session) — use fast timeout
             if (refreshedUrls.add(url)) {
-                thread {
+                thread(priority = Thread.MIN_PRIORITY) {
                     try {
-                        val result = fetchAndStoreWithFinalUrl(url)
+                        val result = fetchAndStoreWithFinalUrl(url, fast = true)
                         if (result != null) {
                             remoteBaseUrl = result.baseUrl
                             baseFile.writeText(result.baseUrl)
@@ -234,6 +266,9 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
                     }
                 }
             }
+
+            // Prefetch critical sub-resources into memory cache in parallel
+            prefetchCriticalResources()
 
             // Stream directly from file
             val inputStream = BufferedInputStream(FileInputStream(dataFile), 65536)
@@ -267,6 +302,26 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
      * No cache → fetch synchronously, store, return.
      */
     private fun serveCachedOrFetch(url: String): WebResourceResponse? {
+        // 1. Check memory cache first (fastest path — prefetched resources)
+        memoryCache[url]?.let { (data, contentType) ->
+            debugLog("MEM-HIT $url (${data.size}B)")
+            val mimeType = extractMimeType(contentType)
+            val encoding = if (isBinaryMime(mimeType)) null else (extractEncoding(contentType) ?: "utf-8")
+            val headers = mutableMapOf(
+                "Access-Control-Allow-Origin" to "*",
+                "Cache-Control" to "no-store"
+            )
+            // Background refresh (only once per session)
+            if (refreshedUrls.add(url)) {
+                thread(priority = Thread.MIN_PRIORITY) {
+                    try { fetchAndStore(url, fast = true); debugLog("BG-OK $url") }
+                    catch (e: Exception) { debugLog("BG-FAIL $url: ${e.message}") }
+                }
+            }
+            return WebResourceResponse(mimeType, encoding, 200, "OK", headers, ByteArrayInputStream(data))
+        }
+
+        // 2. Check disk cache
         val dataFile = getCacheFile(url)
         val metaFile = getMetaFile(url)
 
@@ -276,11 +331,11 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
             val mimeType = extractMimeType(contentType)
             val encoding = if (isBinaryMime(mimeType)) null else (extractEncoding(contentType) ?: "utf-8")
 
-            // Background refresh (only once per session)
+            // Background refresh (only once per session) — use fast timeout, low priority
             if (refreshedUrls.add(url)) {
-                thread {
+                thread(priority = Thread.MIN_PRIORITY) {
                     try {
-                        fetchAndStore(url)
+                        fetchAndStore(url, fast = true)
                         debugLog("BG-OK $url")
                     } catch (e: Exception) {
                         debugLog("BG-FAIL $url: ${e.message}")
@@ -302,6 +357,8 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
                 debugLog("FETCH-RETURNED-NULL $url")
                 return null
             }
+            // Also store in memory cache for potential subsequent requests
+            memoryCache[url] = Pair(result.data, result.contentType)
             val mimeType = extractMimeType(result.contentType)
             val encoding = if (isBinaryMime(mimeType)) null else (extractEncoding(result.contentType) ?: "utf-8")
             val headers = mutableMapOf(
@@ -315,15 +372,17 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
 
     private data class FetchResultWithUrl(val data: ByteArray, val contentType: String, val baseUrl: String)
 
-    private fun fetchAndStoreWithFinalUrl(originalUrl: String): FetchResultWithUrl? {
+    private fun fetchAndStoreWithFinalUrl(originalUrl: String, fast: Boolean = false): FetchResultWithUrl? {
         var cur = originalUrl
         var redir = 0
+        val connTimeout = if (fast) CONNECT_TIMEOUT_FAST else CONNECT_TIMEOUT_MISS
+        val readTimeout = if (fast) READ_TIMEOUT_FAST else READ_TIMEOUT_MISS
         while (redir < MAX_REDIRECTS) {
-            debugLog("MAIN-FETCH $cur (redirect #$redir)")
+            debugLog("MAIN-FETCH $cur (redirect #$redir, fast=$fast)")
             val conn = URL(cur).openConnection() as HttpURLConnection
             conn.instanceFollowRedirects = false
-            conn.connectTimeout = 30_000
-            conn.readTimeout = 30_000
+            conn.connectTimeout = connTimeout
+            conn.readTimeout = readTimeout
             conn.setRequestProperty("Accept-Encoding", "gzip, deflate")
             conn.setRequestProperty("User-Agent",
                 "Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
@@ -368,15 +427,17 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
         return null
     }
 
-    private fun fetchAndStore(originalUrl: String): FetchResult? {
+    private fun fetchAndStore(originalUrl: String, fast: Boolean = false): FetchResult? {
         var cur = originalUrl
         var redir = 0
+        val connTimeout = if (fast) CONNECT_TIMEOUT_FAST else CONNECT_TIMEOUT_MISS
+        val readTimeout = if (fast) READ_TIMEOUT_FAST else READ_TIMEOUT_MISS
         while (redir < MAX_REDIRECTS) {
-            debugLog("FETCH $cur (redirect #$redir)")
+            debugLog("FETCH $cur (redirect #$redir, fast=$fast)")
             val conn = URL(cur).openConnection() as HttpURLConnection
             conn.instanceFollowRedirects = false
-            conn.connectTimeout = 30_000
-            conn.readTimeout = 30_000
+            conn.connectTimeout = connTimeout
+            conn.readTimeout = readTimeout
             conn.setRequestProperty("Accept-Encoding", "gzip, deflate")
             conn.setRequestProperty("User-Agent",
                 "Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
@@ -425,6 +486,46 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
         }
     }
 
+
+    /**
+     * Prefetch critical sub-resources (JS + WASM) into memory cache in parallel.
+     * Called immediately after main page cache hit, before WebView starts parsing HTML.
+     * This ensures sub-resources are ready when WebView requests them.
+     */
+    private fun prefetchCriticalResources() {
+        val base = remoteBaseUrl
+        debugLog("PREFETCH starting for ${CRITICAL_SUBRESOURCES.size} resources, base=$base")
+        for (subPath in CRITICAL_SUBRESOURCES) {
+            val fullUrl = base + subPath
+            // Skip if already in memory cache
+            if (memoryCache.containsKey(fullUrl)) {
+                debugLog("PREFETCH skip (memory hit): $fullUrl")
+                continue
+            }
+            thread {
+                try {
+                    val dataFile = getCacheFile(fullUrl)
+                    val metaFile = getMetaFile(fullUrl)
+                    if (dataFile.exists() && metaFile.exists() && dataFile.length() > 0) {
+                        // Load from disk into memory cache for instant serving
+                        val data = dataFile.readBytes()
+                        val ct = metaFile.readText()
+                        memoryCache[fullUrl] = Pair(data, ct)
+                        debugLog("PREFETCH disk→mem OK: $fullUrl (${data.size}B)")
+                    } else {
+                        // Fetch from network and store both disk + memory
+                        val result = fetchAndStore(fullUrl)
+                        if (result != null) {
+                            memoryCache[fullUrl] = Pair(result.data, result.contentType)
+                            debugLog("PREFETCH net→mem OK: $fullUrl (${result.data.size}B)")
+                        }
+                    }
+                } catch (e: Exception) {
+                    debugLog("PREFETCH ERR: $fullUrl: ${e.message}")
+                }
+            }
+        }
+    }
 
     private fun getCacheFile(url: String) = File(cacheDir, "${sha256(url)}${extOf(url)}")
     private fun getMetaFile(url: String) = File(cacheDir, "${sha256(url)}.meta")
@@ -494,6 +595,7 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
         if (url == "http://tauri.localhost/" && mainFrameLoaded) {
             debugLog(">>> Main page finished, waiting for app render to remove splash")
             // Poll for the #app div having children (WASM app rendered)
+            // Use aggressive polling: start immediately, 50ms interval (was 200ms + 100ms)
             val handler = Handler(Looper.getMainLooper())
             val pollRunnable = object : Runnable {
                 var attempts = 0
@@ -502,20 +604,21 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
                     view.evaluateJavascript(
                         "(document.getElementById('app') && document.getElementById('app').children.length > 0) || document.body.children.length > 1"
                     ) { result ->
-                        if (result == "true" || attempts > 100) {
+                        if (result == "true" || attempts > 60) {
                             debugLog(">>> App rendered (attempts=$attempts), removing splash")
                             (context as? MainActivity)?.removeSplash()
                         } else {
-                            handler.postDelayed(this, 100)
+                            handler.postDelayed(this, 50)
                         }
                     }
                 }
             }
-            handler.postDelayed(pollRunnable, 200)
-            // Fallback: remove splash after 8s max
+            // Start polling immediately (no initial delay)
+            handler.post(pollRunnable)
+            // Fallback: remove splash after 5s max (was 8s)
             handler.postDelayed({
                 (context as? MainActivity)?.removeSplash()
-            }, 8000)
+            }, 5000)
         }
     }
 
