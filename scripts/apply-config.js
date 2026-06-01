@@ -39,6 +39,7 @@ function writeTauriConf (config) {
       "beforeBuildCommand": "node scripts/apply-config.js"
     },
     "app": {
+      "withGlobalTauri": true,
       "windows": [
         {
           "title": config.ui.window.title,
@@ -95,23 +96,130 @@ function getLoadingHtml (config) {
 
 /**
  * Generate the index.html that Tauri loads as the frontend entry point.
+ * Includes splash screen with the actual project logo (base64 inlined) + spinner,
+ * then navigates to the remote URL.
  * Can be overridden by setting ui.indexHtml in app.config.json.
  */
 function getIndexHtml (config) {
   if (config.ui.indexHtml) {
     return config.ui.indexHtml;
   }
+  const bg = config.ui.backgroundColor;
+  const spinnerColor = config.ui.loadingSpinnerColor || '#1677ff';
+  const trackColor = config.ui.loadingSpinnerTrackColor || '#e0e0e0';
+  const fadeDuration = config.ui.splashFadeDurationMs || 300;
+
+  // Read the splash icon and inline as base64
+  const splashIconPath = path.join(ROOT, 'src-tauri', 'icons', 'splash-icon.png');
+  let logoDataUri = '';
+  if (fs.existsSync(splashIconPath)) {
+    const iconBase64 = fs.readFileSync(splashIconPath).toString('base64');
+    logoDataUri = 'data:image/png;base64,' + iconBase64;
+  }
+
   return `<!doctype html>
 <html>
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>${config.app.name}</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: ${bg}; }
+      #splash {
+        position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        background: ${bg}; z-index: 99999;
+        transition: opacity ${fadeDuration}ms ease-out;
+        /* Extend into safe areas */
+        padding-top: env(safe-area-inset-top);
+        padding-bottom: env(safe-area-inset-bottom);
+        padding-left: env(safe-area-inset-left);
+        padding-right: env(safe-area-inset-right);
+      }
+      #splash.fade-out { opacity: 0; pointer-events: none; }
+      #splash-logo {
+        width: 120px; height: 120px; margin-bottom: 32px;
+      }
+      #splash-logo img {
+        width: 100%; height: 100%;
+        object-fit: contain;
+      }
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+      .loader {
+        width: 36px; height: 36px;
+        border: 3px solid ${trackColor};
+        border-top: 3px solid ${spinnerColor};
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      #app { width: 100%; height: 100%; }
+    </style>
   </head>
-  <body style="background: ${config.ui.backgroundColor}; margin: 0; padding: 0">
+  <body>
+    <div id="splash">
+      <div id="splash-logo">
+        <img src="${logoDataUri}" alt="${config.app.name}" />
+      </div>
+      <div class="loader"></div>
+    </div>
     <div id="app"></div>
     <script>
-      window.location.href = '${config.remote.url}';
+      (function() {
+        var REMOTE_URL = '${config.remote.url}';
+        var FADE_DURATION = ${fadeDuration};
+
+        function removeSplash() {
+          var s = document.getElementById('splash');
+          if (s) {
+            s.classList.add('fade-out');
+            setTimeout(function() { s.remove(); }, FADE_DURATION);
+          }
+        }
+
+        function goRemote() {
+          removeSplash();
+          setTimeout(function() { window.location.replace(REMOTE_URL); }, FADE_DURATION);
+        }
+
+        function tryCache() {
+          var t = window.__TAURI__;
+          if (!t) return false;
+          var invoke = (t.core && t.core.invoke) || t.invoke;
+          if (!invoke) return false;
+          invoke('load_cached_resource').then(function(result) {
+            if (result && result.html) {
+              console.log('[EUV] cache hit, from_cache=' + result.from_cache);
+              document.open();
+              document.write(result.html);
+              document.close();
+            } else {
+              goRemote();
+            }
+          }).catch(function(err) {
+            console.warn('[EUV] cache error:', err);
+            goRemote();
+          });
+          return true;
+        }
+
+        // Poll for __TAURI__ (injected async by Tauri runtime)
+        var polls = 0;
+        var timer = setInterval(function() {
+          polls++;
+          if (tryCache()) {
+            clearInterval(timer);
+          } else if (polls >= 30) { // 3s max
+            clearInterval(timer);
+            goRemote();
+          }
+        }, 100);
+        // Try immediately
+        if (tryCache()) clearInterval(timer);
+      })();
     </script>
   </body>
 </html>
@@ -222,6 +330,40 @@ ${criticalResources}
   console.log('[OK] Android AppConfig.kt generated');
 }
 
+function writeIosSigning (config) {
+  // iOS 工程由 `tauri ios init` 生成，仅在其存在时注入签名信息。
+  const projectYmlPath = path.join(ROOT, 'src-tauri', 'gen', 'apple', 'project.yml');
+  if (!fs.existsSync(projectYmlPath)) {
+    return; // iOS 工程尚未初始化，跳过
+  }
+
+  const bundleId = (config.ios && config.ios.bundleIdentifier) || config.app.identifier;
+  const teamId = (config.ios && config.ios.teamId) || '';
+  let yml = fs.readFileSync(projectYmlPath, 'utf-8');
+
+  // 修正 bundleIdPrefix（取 bundleId 去掉最后一段）
+  const prefix = bundleId.includes('.') ? bundleId.slice(0, bundleId.lastIndexOf('.')) : bundleId;
+  yml = yml.replace(/bundleIdPrefix:.*/g, `bundleIdPrefix: ${prefix}`);
+
+  // 注入/更新 settingGroups.app.base 下的签名相关 key
+  yml = yml.replace(/PRODUCT_BUNDLE_IDENTIFIER:.*/g, `PRODUCT_BUNDLE_IDENTIFIER: ${bundleId}`);
+
+  if (teamId) {
+    if (/DEVELOPMENT_TEAM:/.test(yml)) {
+      yml = yml.replace(/DEVELOPMENT_TEAM:.*/g, `DEVELOPMENT_TEAM: ${teamId}`);
+    } else {
+      // 在 PRODUCT_BUNDLE_IDENTIFIER 行后追加签名设置
+      yml = yml.replace(
+        /(\n(\s*)PRODUCT_BUNDLE_IDENTIFIER: .*)/,
+        `$1\n$2DEVELOPMENT_TEAM: ${teamId}\n$2CODE_SIGN_STYLE: Automatic\n$2CODE_SIGN_IDENTITY: Apple Development`
+      );
+    }
+  }
+
+  fs.writeFileSync(projectYmlPath, yml);
+  console.log(`[OK] iOS project.yml signing applied (bundleId=${bundleId}, team=${teamId || 'none'})`);
+}
+
 function main () {
   console.log('[apply-config] Reading app.config.json...');
   const config = loadConfig();
@@ -232,6 +374,7 @@ function main () {
   writeAndroidStrings(config);
   writeRustConst(config);
   writeAndroidConfig(config);
+  writeIosSigning(config);
 
   console.log('[apply-config] Done! All platform configs updated.');
 }

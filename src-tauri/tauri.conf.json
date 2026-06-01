@@ -2,13 +2,14 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Euv",
   "version": "0.1.0",
-  "identifier": "com.euv",
+  "identifier": "com.yudong.euv",
   "build": {
     "frontendDist": "../dist",
     "beforeDevCommand": "",
     "beforeBuildCommand": "node scripts/apply-config.js"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "Euv",

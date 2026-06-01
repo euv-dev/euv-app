@@ -101,6 +101,15 @@ build_android() {
     export JAVA_HOME="/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home"
     export PATH="$JAVA_HOME/bin:$PATH"
 
+    # Android SDK / NDK
+    export ANDROID_HOME="${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}"
+    if [ -z "${NDK_HOME:-}" ] && [ -d "$ANDROID_HOME/ndk" ]; then
+        NDK_VER=$(ls "$ANDROID_HOME/ndk" 2>/dev/null | sort -V | tail -1)
+        export NDK_HOME="$ANDROID_HOME/ndk/$NDK_VER"
+    fi
+    [ -n "${NDK_HOME:-}" ] || error "未找到 Android NDK，请通过 sdkmanager 安装 ndk"
+    info "NDK_HOME: $NDK_HOME"
+
     info "Node: $(node --version), Java: $(java -version 2>&1 | head -1)"
 
     BUILD_START=$(date +%s)
@@ -138,12 +147,15 @@ build_android() {
 
     # 定位产物
     APK_DIR="src-tauri/gen/android/app/build/outputs/apk"
+    # 应用名转小写（兼容 bash 3.2，避免 ${var,,}）
+    local app_lower
+    app_lower=$(printf '%s' "$APP_NAME" | tr '[:upper:]' '[:lower:]')
     if [ "$mode" = "release" ]; then
         APK_PATH="$APK_DIR/universal/release/app-universal-release.apk"
-        OUTPUT_NAME="${APP_NAME,,}.apk"
+        OUTPUT_NAME="${app_lower}.apk"
     else
         APK_PATH="$APK_DIR/universal/debug/app-universal-debug.apk"
-        OUTPUT_NAME="${APP_NAME,,}-debug.apk"
+        OUTPUT_NAME="${app_lower}-debug.apk"
     fi
 
     if [ -f "$APK_PATH" ]; then

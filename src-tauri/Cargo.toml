@@ -21,3 +21,8 @@ serde = { version = "1", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-log = "2"
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+url = "2"
+
+[patch.crates-io]
+swift-rs = { path = "../local-deps/swift-rs" }

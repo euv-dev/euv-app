@@ -4,6 +4,7 @@
 /target
 /.vscode
 node_modules
+.DS_Store
 
 # Build artifacts
 gen/android/build/
@@ -11,8 +12,14 @@ gen/android/.gradle/
 gen/android/app/build/
 gen/android/app/src/main/assets/
 src-tauri/target/
+src-tauri/gen/apple/build/
 *.apk
 *.aab
+*.ipa
+*.app.zip
+
+# Local patches (machine-specific)
+local-deps/
 
 # Secrets
 keystore.jks
@@ -21,3 +28,6 @@ local.properties
 
 # Debug artifacts
 screenshot_*.png
+
+# Generated schemas
+src-tauri/gen/schemas/

@@ -2,7 +2,7 @@
   "$schema": "./app.config.schema.json",
   "app": {
     "name": "Euv",
-    "identifier": "com.euv",
+    "identifier": "com.yudong.euv",
     "version": "0.1.0",
     "description": "Euv App",
     "author": "you"
@@ -56,9 +56,9 @@
     }
   },
   "ios": {
-    "bundleIdentifier": "com.euv",
+    "bundleIdentifier": "com.yudong.euv",
     "deploymentTarget": "14.0",
-    "teamId": ""
+    "teamId": "5TUTGP8PPZ"
   },
   "icons": {
     "source": "src-tauri/icons/icon.png",
