@@ -428,38 +428,43 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
      * This completely replaces the remote HTML with a faster-loading equivalent.
      */
     private fun generateOptimizedHtml(): WebResourceResponse {
+        // No CSS animation — native splash handles the visual feedback.
+        // WASM module is cached in IndexedDB after first compile, so subsequent
+        // launches skip the expensive ~500ms compilation entirely.
         val html = """<!DOCTYPE html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>Euv</title>
-<style>
-body{margin:0;padding:0;background:#fff}
-._s{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:#fff;z-index:99999;transition:opacity .3s}
-._sp{width:36px;height:36px;border:3px solid #e0e0e0;border-top-color:#1890ff;border-radius:50%;animation:_r .8s linear infinite}
-@keyframes _r{to{transform:rotate(360deg)}}
-</style>
+<style>body{margin:0;padding:0;background:#fff}</style>
 </head><body>
-<div class="_s" id="_s"><div class="_sp"></div></div>
 <div id="app"></div>
 <script>
-// Start WASM compilation immediately — don't wait for JS module to load
-var wasmReady = WebAssembly.compileStreaming(fetch('./pkg/euv_bg.wasm'));
-// Load JS module in parallel
-import('./pkg/euv.js').then(function(mod) {
-    return wasmReady.then(function(compiled) {
-        return mod.default(compiled);
-    }).then(function() {
-        mod.main();
-    });
-});
-// Remove spinner when app renders
-new MutationObserver(function(m,o){
-    var a=document.getElementById('app');
-    if(a&&a.children.length>0){
-        var s=document.getElementById('_s');
-        if(s){s.style.opacity='0';setTimeout(function(){s.remove()},300)}
-        o.disconnect();
+(function(){
+// IndexedDB cache for compiled WASM module — skips ~500ms recompilation
+var DB='euv_wasm',ST='m',K='w';
+function openDB(){return new Promise(function(r){var q=indexedDB.open(DB,1);q.onupgradeneeded=function(e){e.target.result.createObjectStore(ST)};q.onsuccess=function(e){r(e.target.result)};q.onerror=function(){r(null)}})}
+function getM(db){if(!db)return Promise.resolve(null);return new Promise(function(r){try{var t=db.transaction(ST);var q=t.objectStore(ST).get(K);q.onsuccess=function(){r(q.result||null)};q.onerror=function(){r(null)}}catch(e){r(null)}})}
+function putM(db,m){if(!db)return;try{db.transaction(ST,'readwrite').objectStore(ST).put(m,K)}catch(e){}}
+
+// Start JS module load immediately (parallel)
+var js=import('./pkg/euv.js');
+
+openDB().then(function(db){
+  return getM(db).then(function(cached){
+    if(cached){
+      // Cache hit: pass compiled Module directly to wasm-bindgen init (~5ms)
+      return js.then(function(m){return m.default(cached).then(function(){m.main()})});
     }
-}).observe(document.body,{childList:true,subtree:true});
+    // Cache miss: compile + store, then init
+    return WebAssembly.compileStreaming(fetch('./pkg/euv_bg.wasm')).then(function(mod){
+      putM(db,mod);
+      return js.then(function(m){return m.default(mod).then(function(){m.main()})});
+    });
+  });
+}).catch(function(){
+  // Fallback without cache
+  js.then(function(m){return m.default().then(function(){m.main()})});
+});
+})();
 </script>
 </body></html>"""
 
@@ -548,7 +553,7 @@ new MutationObserver(function(m,o){
                     checkReady();
                 })();
             """.trimIndent(), null)
-            // Poll for WASM render completion to remove native splash
+            // Poll for WASM render completion to remove native splash — start immediately
             val handler = Handler(Looper.getMainLooper())
             val pollRunnable = object : Runnable {
                 override fun run() {
@@ -557,17 +562,17 @@ new MutationObserver(function(m,o){
                             debugLog(">>> WASM rendered, removing native splash")
                             (context as? MainActivity)?.removeSplash()
                         } else {
-                            handler.postDelayed(this, 200)
+                            handler.postDelayed(this, 50)
                         }
                     }
                 }
             }
-            handler.postDelayed(pollRunnable, 500)
-            // Fallback: remove splash after 15s max
+            handler.postDelayed(pollRunnable, 100)
+            // Fallback: remove splash after 10s max
             handler.postDelayed({
                 debugLog(">>> Splash timeout, force removing")
                 (context as? MainActivity)?.removeSplash()
-            }, 15000)
+            }, 10000)
         }
     }
 
