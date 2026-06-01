@@ -1,13 +1,9 @@
-mod cache;
-
-use cache::*;
-
-use {serde::Serialize, tauri::Manager};
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    println!("[EUV] Rust run() started");
+    let result = tauri::Builder::default()
         .setup(|app| {
+            println!("[EUV] setup() called");
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -15,13 +11,13 @@ pub fn run() {
                         .build(),
                 )?;
             }
-            let app_handle: tauri::AppHandle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                update_cache_async(app_handle).await;
-            });
+            println!("[EUV] setup() done");
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![load_cached_resource])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .run(tauri::generate_context!());
+
+    match result {
+        Ok(_) => println!("[EUV] tauri run() completed"),
+        Err(e) => println!("[EUV] tauri run() error: {:?}", e),
+    }
 }

@@ -1,4 +1,4 @@
-import java.util.Properties
+﻿import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -33,7 +33,7 @@ android {
     }
     signingConfigs {
         create("release") {
-            storeFile = file("C:/Users/14915/Desktop/truri-app/keystore.jks")
+            storeFile = file("C:/Users/14915/Desktop/euv-app/keystore.jks")
             storePassword = "euv123456"
             keyAlias = "euv"
             keyPassword = "euv123456"
@@ -86,3 +86,7 @@ dependencies {
 }
 
 apply(from = "tauri.build.gradle.kts")
+
+
+
+

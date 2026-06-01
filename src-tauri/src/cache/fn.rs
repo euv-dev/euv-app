@@ -1,144 +1,159 @@
-use crate::*;
+/// URL resolution and filesystem path mapping utilities.
+use std::path::PathBuf;
 
-/// Reads the cached HTML content from the local file system.
-///
-/// # Arguments
-/// - `app_handle`: The Tauri application handle used to resolve the app data directory.
-///
-/// # Returns
-/// - `Result<String, CacheError>`: The cached HTML string on success, or a `CacheError` on failure.
-pub async fn read_cache(app_handle: &tauri::AppHandle) -> Result<String, CacheError> {
-    let cache_dir: std::path::PathBuf = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|error: tauri::Error| CacheError::Read(format!("{}", error)))?;
-    let cache_path: std::path::PathBuf = cache_dir.join(CACHE_FILENAME);
-    if cache_path.exists() {
-        let content: String = tokio::fs::read_to_string(&cache_path)
-            .await
-            .map_err(|error: std::io::Error| CacheError::Read(format!("{}", error)))?;
-        log::info!("[cache] Read cached content, size: {} bytes", content.len());
-        return Ok(content);
-    }
-    log::info!("[cache] No cached file found at {:?}", cache_path);
-    Err(CacheError::Read("Cache file not found".to_string()))
-}
+/// Maps a URL to a local filesystem path within the cache directory.
+pub fn url_to_cache_path(cache_dir: &std::path::Path, url: &str) -> Option<PathBuf> {
+    let parsed = match url::Url::parse(url) {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+    let host = parsed.host_str().unwrap_or("unknown");
+    let path = parsed.path();
 
-/// Writes the HTML content to the local cache file.
-///
-/// # Arguments
-/// - `app_handle`: The Tauri application handle used to resolve the app data directory.
-/// - `content`: The HTML content string to cache.
-///
-/// # Returns
-/// - `Result<(), CacheError>`: Ok on success, or a `CacheError` on failure.
-pub async fn write_cache(app_handle: &tauri::AppHandle, content: &str) -> Result<(), CacheError> {
-    let cache_dir: std::path::PathBuf = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|error: tauri::Error| CacheError::Write(format!("{}", error)))?;
-    tokio::fs::create_dir_all(&cache_dir)
-        .await
-        .map_err(|error: std::io::Error| CacheError::Write(format!("{}", error)))?;
-    let cache_path: std::path::PathBuf = cache_dir.join(CACHE_FILENAME);
-    tokio::fs::write(&cache_path, content)
-        .await
-        .map_err(|error: std::io::Error| CacheError::Write(format!("{}", error)))?;
-    log::info!(
-        "[cache] Cached content written, size: {} bytes",
-        content.len()
-    );
-    Ok(())
-}
-
-/// Fetches the remote HTML content from the configured URL.
-///
-/// # Returns
-/// - `Result<String, CacheError>`: The fetched HTML string on success, or a `CacheError` on failure.
-pub async fn fetch_remote() -> Result<String, CacheError> {
-    let client: reqwest::Client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .build()
-        .map_err(|error: reqwest::Error| CacheError::Fetch(format!("{}", error)))?;
-    let response: reqwest::Response = client
-        .get(REMOTE_URL)
-        .send()
-        .await
-        .map_err(|error: reqwest::Error| CacheError::Fetch(format!("{}", error)))?;
-    let status: reqwest::StatusCode = response.status();
-    if !status.is_success() {
-        return Err(CacheError::Fetch(format!("HTTP status: {}", status)));
-    }
-    let content: String = response
-        .text()
-        .await
-        .map_err(|error: reqwest::Error| CacheError::Fetch(format!("{}", error)))?;
-    log::info!(
-        "[cache] Fetched remote content, size: {} bytes",
-        content.len()
-    );
-    Ok(content)
-}
-
-/// Loads the resource content: first tries the local cache, then falls back to a remote fetch.
-///
-/// # Arguments
-/// - `app_handle`: The Tauri application handle used to resolve the app data directory.
-///
-/// # Returns
-/// - `Result<LoadResult, CacheError>`: A `LoadResult` containing the content and its source.
-pub async fn load_resource(app_handle: &tauri::AppHandle) -> Result<LoadResult, CacheError> {
-    match read_cache(app_handle).await {
-        Ok(content) => Ok(LoadResult {
-            content,
-            from_cache: true,
-        }),
-        Err(_) => {
-            log::info!("[cache] Cache miss, fetching from remote...");
-            let content: String = fetch_remote().await?;
-            let _ = write_cache(app_handle, &content).await;
-            Ok(LoadResult {
-                content,
-                from_cache: false,
-            })
+    let rel_path = if path == "/" || path.is_empty() {
+        PathBuf::from(host).join("index.html")
+    } else {
+        let clean_path = path.strip_prefix('/').unwrap_or(path);
+        if clean_path.is_empty() {
+            PathBuf::from(host).join("index.html")
+        } else {
+            PathBuf::from(host).join(clean_path)
         }
-    }
+    };
+
+    Some(cache_dir.join(rel_path))
 }
 
-/// Asynchronously updates the local cache by fetching the latest remote content.
-/// This is intended to be called after app startup so the next launch uses fresh content.
-///
-/// # Arguments
-/// - `app_handle`: The Tauri application handle used to resolve the app data directory.
-pub async fn update_cache_async(app_handle: tauri::AppHandle) {
-    log::info!("[cache] Starting async cache update...");
-    match fetch_remote().await {
-        Ok(content) => {
-            if let Err(error) = write_cache(&app_handle, &content).await {
-                log::error!("[cache] Failed to write updated cache: {}", error);
+/// Extracts all resource URLs from an HTML document.
+pub fn extract_resource_urls(html: &str, base_url: &str) -> Vec<(String, String)> {
+    let mut resources = Vec::new();
+    let base = match url::Url::parse(base_url) {
+        Ok(b) => b,
+        Err(_) => return resources,
+    };
+
+    let prefixes: Vec<(&str, &str, &str)> = vec![
+        ("href=\"", "\"", "link"),
+        ("href='", "'", "link"),
+        ("src=\"", "\"", "script"),
+        ("src='", "'", "script"),
+    ];
+
+    for (prefix, suffix, kind) in &prefixes {
+        let mut search_start = 0;
+        while let Some(pos) = html[search_start..].find(*prefix) {
+            let abs_pos = search_start + pos + prefix.len();
+            if let Some(end_pos) = html[abs_pos..].find(*suffix) {
+                let raw_url = &html[abs_pos..abs_pos + end_pos];
+                if !raw_url.is_empty()
+                    && !raw_url.starts_with("data:")
+                    && !raw_url.starts_with('#')
+                    && !raw_url.starts_with("javascript:")
+                {
+                    if let Ok(resolved) = base.join(raw_url) {
+                        resources.push((resolved.as_str().to_string(), kind.to_string()));
+                    }
+                }
+                search_start = abs_pos + end_pos + suffix.len();
             } else {
-                log::info!("[cache] Async cache update completed successfully");
+                break;
             }
         }
-        Err(error) => {
-            log::error!(
-                "[cache] Failed to fetch remote content for update: {}",
-                error
-            );
-        }
     }
+
+    resources.dedup();
+    resources
 }
 
-/// Tauri command that loads the cached or remote resource content.
-///
-/// # Arguments
-/// - `app_handle`: The Tauri application handle used to resolve the app data directory.
-///
-/// # Returns
-/// - `Result<LoadResult, String>`: A `LoadResult` containing the content and its source, or an error message.
-#[tauri::command]
-pub async fn load_cached_resource(app_handle: tauri::AppHandle) -> Result<LoadResult, String> {
-    load_resource(&app_handle)
-        .await
-        .map_err(|error: CacheError| format!("{}", error))
+/// Rewrites HTML content, replacing remote URLs with local file:// paths.
+pub fn rewrite_html_urls(html: &str, base_url: &str, cache_dir: &std::path::Path) -> String {
+    let mut result = html.to_string();
+    let base = match url::Url::parse(base_url) {
+        Ok(b) => b,
+        Err(_) => return result,
+    };
+
+    let mut replacements: Vec<(String, String)> = Vec::new();
+
+    // Find all href="..." and src="..."
+    let attr_prefixes: Vec<(&str, &str)> = vec![
+        ("href=\"", "\""),
+        ("href='", "'"),
+        ("src=\"", "\""),
+        ("src='", "'"),
+    ];
+
+    for (prefix, suffix) in &attr_prefixes {
+        let mut search_start = 0;
+        while let Some(pos) = result[search_start..].find(*prefix) {
+            let abs_pos = search_start + pos + prefix.len();
+            if let Some(end_pos) = result[abs_pos..].find(*suffix) {
+                let raw_url = &result[abs_pos..abs_pos + end_pos];
+                if !raw_url.is_empty()
+                    && !raw_url.starts_with("data:")
+                    && !raw_url.starts_with('#')
+                    && !raw_url.starts_with("javascript:")
+                    && !raw_url.starts_with("file:")
+                {
+                    if let Ok(resolved) = base.join(raw_url) {
+                        if let Some(local_path) = url_to_cache_path(cache_dir, resolved.as_str()) {
+                            let local_url = format!(
+                                "file:///{}",
+                                local_path.display().to_string().replace('\\', "/")
+                            );
+                            replacements.push((raw_url.to_string(), local_url));
+                        }
+                    }
+                }
+                search_start = abs_pos + end_pos + 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Also handle url(...) in inline styles
+    let css_prefixes: Vec<(&str, &str)> = vec![
+        ("url(\"", "\""),
+        ("url('", "'"),
+    ];
+
+    for (prefix, suffix) in &css_prefixes {
+        let mut search_start = 0;
+        while let Some(pos) = result[search_start..].find(*prefix) {
+            let abs_pos = search_start + pos + prefix.len();
+            if let Some(end_pos) = result[abs_pos..].find(*suffix) {
+                let raw_url = &result[abs_pos..abs_pos + end_pos];
+                if !raw_url.is_empty()
+                    && !raw_url.starts_with("data:")
+                    && !raw_url.starts_with("file:")
+                {
+                    if let Ok(resolved) = base.join(raw_url) {
+                        if let Some(local_path) = url_to_cache_path(cache_dir, resolved.as_str()) {
+                            let local_url = format!(
+                                "file:///{}",
+                                local_path.display().to_string().replace('\\', "/")
+                            );
+                            replacements.push((raw_url.to_string(), local_url));
+                        }
+                    }
+                }
+                search_start = abs_pos + end_pos + 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Apply replacements - replace both "url" and 'url' forms
+    for (original, local) in replacements {
+        let with_double = format!("\"{}\"", original);
+        let with_double_new = format!("\"{}\"", local);
+        let with_single = format!("'{}'", original);
+        let with_single_new = format!("'{}'", local);
+        result = result.replace(&with_double, &with_double_new);
+        result = result.replace(&with_single, &with_single_new);
+    }
+
+    result
 }

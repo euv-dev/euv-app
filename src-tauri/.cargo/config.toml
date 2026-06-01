@@ -1,0 +1,15 @@
+[target.aarch64-linux-android]
+linker = "C:/Users/14915/AppData/Local/Android/Sdk/ndk/android-ndk-r27b/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe"
+ar = "C:/Users/14915/AppData/Local/Android/Sdk/ndk/android-ndk-r27b/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
+
+[target.armv7-linux-androideabi]
+linker = "C:/Users/14915/AppData/Local/Android/Sdk/ndk/android-ndk-r27b/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe"
+ar = "C:/Users/14915/AppData/Local/Android/Sdk/ndk/android-ndk-r27b/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
+
+[target.x86_64-linux-android]
+linker = "C:/Users/14915/AppData/Local/Android/Sdk/ndk/android-ndk-r27b/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe"
+ar = "C:/Users/14915/AppData/Local/Android/Sdk/ndk/android-ndk-r27b/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
+
+[target.i686-linux-android]
+linker = "C:/Users/14915/AppData/Local/Android/Sdk/ndk/android-ndk-r27b/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe"
+ar = "C:/Users/14915/AppData/Local/Android/Sdk/ndk/android-ndk-r27b/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
