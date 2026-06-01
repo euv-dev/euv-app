@@ -21,13 +21,13 @@ val keystoreProperties = Properties().apply {
 }
 
 android {
-    compileSdk = 36
+    compileSdk = 35
     namespace = "com.euv"
     defaultConfig {
-        manifestPlaceholders["usesCleartextTraffic"] = "false"
+        manifestPlaceholders["usesCleartextTraffic"] = "true"
         applicationId = "com.euv"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = 35
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
@@ -62,8 +62,12 @@ android {
             )
         }
     }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
     kotlinOptions {
-        jvmTarget = "1.8"
+        jvmTarget = "17"
     }
     buildFeatures {
         buildConfig = true
@@ -86,6 +90,24 @@ dependencies {
 }
 
 apply(from = "tauri.build.gradle.kts")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

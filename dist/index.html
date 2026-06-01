@@ -52,7 +52,6 @@
       (function() {
         var REMOTE_URL = 'https://ltpp.vip/euv';
         var FADE_DURATION = 300;
-
         function removeSplash() {
           var s = document.getElementById('splash');
           if (s) {
@@ -60,46 +59,8 @@
             setTimeout(function() { s.remove(); }, FADE_DURATION);
           }
         }
-
-        function goRemote() {
-          removeSplash();
-          setTimeout(function() { window.location.replace(REMOTE_URL); }, FADE_DURATION);
-        }
-
-        function tryCache() {
-          var t = window.__TAURI__;
-          if (!t) return false;
-          var invoke = (t.core && t.core.invoke) || t.invoke;
-          if (!invoke) return false;
-          invoke('load_cached_resource').then(function(result) {
-            if (result && result.html) {
-              console.log('[EUV] cache hit, from_cache=' + result.from_cache);
-              document.open();
-              document.write(result.html);
-              document.close();
-            } else {
-              goRemote();
-            }
-          }).catch(function(err) {
-            console.warn('[EUV] cache error:', err);
-            goRemote();
-          });
-          return true;
-        }
-
-        // Poll for __TAURI__ (injected async by Tauri runtime)
-        var polls = 0;
-        var timer = setInterval(function() {
-          polls++;
-          if (tryCache()) {
-            clearInterval(timer);
-          } else if (polls >= 30) { // 3s max
-            clearInterval(timer);
-            goRemote();
-          }
-        }, 100);
-        // Try immediately
-        if (tryCache()) clearInterval(timer);
+        removeSplash();
+        setTimeout(function() { window.location.replace(REMOTE_URL); }, FADE_DURATION);
       })();
     </script>
   </body>

@@ -1,21 +1,32 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Preserve all classes referenced by AndroidManifest.xml and core app components
+-keep class com.euv.MainActivity { *; }
+-keep class com.euv.KeepAliveService { *; }
+-keep class com.euv.AppConfig { *; }
+-keep class com.euv.TauriActivity { *; }
+-keep class com.euv.WryActivity { *; }
+-keep class com.euv.Rust { *; }
+-keep class com.euv.RustWebView { *; }
+-keep class com.euv.RustWebViewClient { *; }
+-keep class com.euv.RustWebChromeClient { *; }
+-keep class com.euv.Ipc { *; }
+-keep class com.euv.WryLifecycleObserver { *; }
+-keep class com.euv.TauriLifecycleObserver { *; }
+-keep class com.euv.Logger { *; }
+-keep class com.euv.PermissionHelper { *; }
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Preserve all native method holders
+-keepclassmembers class com.euv.** {
+    native <methods>;
+}
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Preserve JavaScript interface methods
+-keepclassmembers class com.euv.Ipc {
+    @android.webkit.JavascriptInterface public <methods>;
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Tauri plugin manager
+-keep class app.tauri.plugin.** { *; }
+
+# Preserve line numbers for debugging
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile

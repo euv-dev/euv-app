@@ -1,15 +1,11 @@
 [package]
-name = "euv"
+name = "euv-app"
 version = "0.1.0"
-description = "euv"
-authors = ["you"]
-license = ""
-repository = ""
-edition = "2021"
-rust-version = "1.77.2"
+description = "euv-app"
+edition = "2024"
 
 [lib]
-name = "app_lib"
+name = "euv_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -21,8 +17,10 @@ serde = { version = "1", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-log = "2"
-reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+reqwest = { version = "0.13.4", features = [
+    "rustls",
+], default-features = false }
 url = "2"
 
-[patch.crates-io]
-swift-rs = { path = "../local-deps/swift-rs" }
+[profile.release]
+incremental = false

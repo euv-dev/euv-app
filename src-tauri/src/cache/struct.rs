@@ -1,32 +1,20 @@
-use std::collections::HashMap;
+use crate::*;
 
 /// Represents a cached web page with all its resources.
-#[derive(serde::Serialize)]
-pub struct CachedPage {
+#[derive(Serialize)]
+pub(crate) struct CachedPage {
     /// The HTML content with rewritten resource URLs pointing to local files.
-    pub html: String,
+    pub(crate) html: String,
     /// Whether this was loaded from cache (true) or freshly fetched (false).
-    pub from_cache: bool,
+    pub(crate) from_cache: bool,
     /// Number of resources cached.
-    pub resource_count: usize,
+    pub(crate) resource_count: usize,
 }
 
 /// Error types for cache operations.
 #[derive(Debug)]
-pub enum CacheError {
+pub(crate) enum CacheError {
     Fetch(String),
     Write(String),
     Read(String),
-    Parse(String),
-}
-
-impl std::fmt::Display for CacheError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CacheError::Fetch(msg) => write!(f, "Fetch error: {}", msg),
-            CacheError::Write(msg) => write!(f, "Write error: {}", msg),
-            CacheError::Read(msg) => write!(f, "Read error: {}", msg),
-            CacheError::Parse(msg) => write!(f, "Parse error: {}", msg),
-        }
-    }
 }

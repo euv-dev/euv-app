@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 /**
  * apply-config.js
- * 
+ *
  * 读取 app.config.json，将配置注入到各平台的配置文件中：
  * - tauri.conf.json
  * - dist/index.html
  * - Android strings.xml
- * - Rust const.rs
  * - Android AppConfig.kt
- * 
+ *
  * 用法: node scripts/apply-config.js
  */
 
@@ -18,7 +17,7 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '..');
 const CONFIG_PATH = path.join(ROOT, 'app.config.json');
 
-function loadConfig () {
+function loadConfig() {
   if (!fs.existsSync(CONFIG_PATH)) {
     console.error('[ERROR] app.config.json not found at:', CONFIG_PATH);
     process.exit(1);
@@ -26,47 +25,46 @@ function loadConfig () {
   return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
 }
 
-function writeTauriConf (config) {
+function writeTauriConf(config) {
   const tauriConfPath = path.join(ROOT, 'src-tauri', 'tauri.conf.json');
   const tauriConf = {
-    "$schema": "https://schema.tauri.app/config/2",
-    "productName": config.app.name,
-    "version": config.app.version,
-    "identifier": config.app.identifier,
-    "build": {
-      "frontendDist": "../dist",
-      "beforeDevCommand": "",
-      "beforeBuildCommand": "node scripts/apply-config.js"
+    $schema: 'https://schema.tauri.app/config/2',
+    productName: config.app.name,
+    version: config.app.version,
+    identifier: config.app.identifier,
+    build: {
+      frontendDist: '../dist',
+      beforeDevCommand: '',
+      beforeBuildCommand: 'node scripts/apply-config.js',
     },
-    "app": {
-      "withGlobalTauri": true,
-      "windows": [
+    app: {
+      withGlobalTauri: true,
+      windows: [
         {
-          "title": config.ui.window.title,
-          "width": config.ui.window.width,
-          "height": config.ui.window.height,
-          "resizable": config.ui.window.resizable,
-          "fullscreen": config.ui.window.fullscreen
-        }
+          title: config.ui.window.title,
+          width: config.ui.window.width,
+          height: config.ui.window.height,
+          resizable: config.ui.window.resizable,
+          fullscreen: config.ui.window.fullscreen,
+        },
       ],
-      "security": {
-        "csp": null
-      }
+      security: {
+        csp: null,
+      },
     },
-    "bundle": {
-      "active": true,
-      "targets": "all",
-      "icon": [
-        "icons/32x32.png",
-        "icons/128x128.png",
-        "icons/128x128@2x.png",
-        "icons/icon.icns",
-        "icons/icon.ico"
+    bundle: {
+      active: true,
+      targets: 'all',
+      icon: [
+        'icons/32x32.png',
+        'icons/128x128.png',
+        'icons/128x128@2x.png',
+        'icons/icon.ico',
       ],
-      "android": {
-        "debugApplicationIdSuffix": ".debug"
-      }
-    }
+      android: {
+        debugApplicationIdSuffix: '.debug',
+      },
+    },
   };
   fs.writeFileSync(tauriConfPath, JSON.stringify(tauriConf, null, 2) + '\n');
   console.log('[OK] tauri.conf.json updated');
@@ -76,7 +74,7 @@ function writeTauriConf (config) {
  * Generate the default loading HTML (used as fallback when offline and no cache).
  * Can be overridden by setting ui.loadingHtml in app.config.json.
  */
-function getLoadingHtml (config) {
+function getLoadingHtml(config) {
   if (config.ui.loadingHtml) {
     return config.ui.loadingHtml;
   }
@@ -100,7 +98,7 @@ function getLoadingHtml (config) {
  * then navigates to the remote URL.
  * Can be overridden by setting ui.indexHtml in app.config.json.
  */
-function getIndexHtml (config) {
+function getIndexHtml(config) {
   if (config.ui.indexHtml) {
     return config.ui.indexHtml;
   }
@@ -110,7 +108,12 @@ function getIndexHtml (config) {
   const fadeDuration = config.ui.splashFadeDurationMs || 300;
 
   // Read the splash icon and inline as base64
-  const splashIconPath = path.join(ROOT, 'src-tauri', 'icons', 'splash-icon.png');
+  const splashIconPath = path.join(
+    ROOT,
+    'src-tauri',
+    'icons',
+    'splash-icon.png',
+  );
   let logoDataUri = '';
   if (fs.existsSync(splashIconPath)) {
     const iconBase64 = fs.readFileSync(splashIconPath).toString('base64');
@@ -171,7 +174,6 @@ function getIndexHtml (config) {
       (function() {
         var REMOTE_URL = '${config.remote.url}';
         var FADE_DURATION = ${fadeDuration};
-
         function removeSplash() {
           var s = document.getElementById('splash');
           if (s) {
@@ -179,46 +181,8 @@ function getIndexHtml (config) {
             setTimeout(function() { s.remove(); }, FADE_DURATION);
           }
         }
-
-        function goRemote() {
-          removeSplash();
-          setTimeout(function() { window.location.replace(REMOTE_URL); }, FADE_DURATION);
-        }
-
-        function tryCache() {
-          var t = window.__TAURI__;
-          if (!t) return false;
-          var invoke = (t.core && t.core.invoke) || t.invoke;
-          if (!invoke) return false;
-          invoke('load_cached_resource').then(function(result) {
-            if (result && result.html) {
-              console.log('[EUV] cache hit, from_cache=' + result.from_cache);
-              document.open();
-              document.write(result.html);
-              document.close();
-            } else {
-              goRemote();
-            }
-          }).catch(function(err) {
-            console.warn('[EUV] cache error:', err);
-            goRemote();
-          });
-          return true;
-        }
-
-        // Poll for __TAURI__ (injected async by Tauri runtime)
-        var polls = 0;
-        var timer = setInterval(function() {
-          polls++;
-          if (tryCache()) {
-            clearInterval(timer);
-          } else if (polls >= 30) { // 3s max
-            clearInterval(timer);
-            goRemote();
-          }
-        }, 100);
-        // Try immediately
-        if (tryCache()) clearInterval(timer);
+        removeSplash();
+        setTimeout(function() { window.location.replace(REMOTE_URL); }, FADE_DURATION);
       })();
     </script>
   </body>
@@ -226,7 +190,7 @@ function getIndexHtml (config) {
 `;
 }
 
-function writeDistIndex (config) {
+function writeDistIndex(config) {
   const indexPath = path.join(ROOT, 'dist', 'index.html');
   const html = getIndexHtml(config);
   fs.mkdirSync(path.dirname(indexPath), { recursive: true });
@@ -234,8 +198,19 @@ function writeDistIndex (config) {
   console.log('[OK] dist/index.html updated');
 }
 
-function writeAndroidStrings (config) {
-  const stringsPath = path.join(ROOT, 'src-tauri', 'gen', 'android', 'app', 'src', 'main', 'res', 'values', 'strings.xml');
+function writeAndroidStrings(config) {
+  const stringsPath = path.join(
+    ROOT,
+    'src-tauri',
+    'gen',
+    'android',
+    'app',
+    'src',
+    'main',
+    'res',
+    'values',
+    'strings.xml',
+  );
   const xml = `<resources>
     <string name="app_name">${config.app.name}</string>
     <string name="main_activity_title">${config.app.name}</string>
@@ -245,33 +220,22 @@ function writeAndroidStrings (config) {
   console.log('[OK] Android strings.xml updated');
 }
 
-function writeRustConst (config) {
-  const constPath = path.join(ROOT, 'src-tauri', 'src', 'cache', 'const.rs');
-  const rust = `/// Auto-generated from app.config.json — do not edit manually.
-
-/// The remote URL to fetch the resource from.
-pub const REMOTE_URL: &str = "${config.remote.url}";
-
-/// The base URL for resolving relative resource paths.
-pub const REMOTE_BASE_URL: &str = "${config.remote.baseUrl}";
-
-/// Subdirectory under app_cache_dir for cached web resources.
-pub const CACHE_DIR: &str = "${config.cache.directory}";
-
-/// Timeout in seconds for remote fetch requests.
-pub const FETCH_TIMEOUT_SECS: u64 = ${config.cache.fetchTimeoutSecs};
-
-/// Maximum response body size in bytes.
-pub const MAX_BODY_SIZE: usize = ${config.cache.maxBodySizeBytes};
-`;
-  fs.writeFileSync(constPath, rust);
-  console.log('[OK] Rust const.rs updated');
-}
-
-function writeAndroidConfig (config) {
-  const configKtPath = path.join(ROOT, 'src-tauri', 'gen', 'android', 'app', 'src', 'main', 'java', 'com', 'euv', 'AppConfig.kt');
+function writeAndroidConfig(config) {
+  const configKtPath = path.join(
+    ROOT,
+    'src-tauri',
+    'gen',
+    'android',
+    'app',
+    'src',
+    'main',
+    'java',
+    'com',
+    'euv',
+    'AppConfig.kt',
+  );
   const criticalResources = config.remote.criticalResources
-    .map(r => `        "${r}"`)
+    .map((r) => `        "${r}"`)
     .join(',\n');
 
   // Generate loading HTML for Android (escaped for Kotlin raw string)
@@ -330,41 +294,32 @@ ${criticalResources}
   console.log('[OK] Android AppConfig.kt generated');
 }
 
-function writeIosSigning (config) {
-  // iOS 工程由 `tauri ios init` 生成，仅在其存在时注入签名信息。
-  const projectYmlPath = path.join(ROOT, 'src-tauri', 'gen', 'apple', 'project.yml');
-  if (!fs.existsSync(projectYmlPath)) {
-    return; // iOS 工程尚未初始化，跳过
+function writeAndroidBuildGradle(config) {
+  const gradlePath = path.join(
+    ROOT,
+    'src-tauri',
+    'gen',
+    'android',
+    'app',
+    'build.gradle.kts',
+  );
+  if (!fs.existsSync(gradlePath)) {
+    return;
   }
-
-  const bundleId = (config.ios && config.ios.bundleIdentifier) || config.app.identifier;
-  const teamId = (config.ios && config.ios.teamId) || '';
-  let yml = fs.readFileSync(projectYmlPath, 'utf-8');
-
-  // 修正 bundleIdPrefix（取 bundleId 去掉最后一段）
-  const prefix = bundleId.includes('.') ? bundleId.slice(0, bundleId.lastIndexOf('.')) : bundleId;
-  yml = yml.replace(/bundleIdPrefix:.*/g, `bundleIdPrefix: ${prefix}`);
-
-  // 注入/更新 settingGroups.app.base 下的签名相关 key
-  yml = yml.replace(/PRODUCT_BUNDLE_IDENTIFIER:.*/g, `PRODUCT_BUNDLE_IDENTIFIER: ${bundleId}`);
-
-  if (teamId) {
-    if (/DEVELOPMENT_TEAM:/.test(yml)) {
-      yml = yml.replace(/DEVELOPMENT_TEAM:.*/g, `DEVELOPMENT_TEAM: ${teamId}`);
-    } else {
-      // 在 PRODUCT_BUNDLE_IDENTIFIER 行后追加签名设置
-      yml = yml.replace(
-        /(\n(\s*)PRODUCT_BUNDLE_IDENTIFIER: .*)/,
-        `$1\n$2DEVELOPMENT_TEAM: ${teamId}\n$2CODE_SIGN_STYLE: Automatic\n$2CODE_SIGN_IDENTITY: Apple Development`
-      );
-    }
-  }
-
-  fs.writeFileSync(projectYmlPath, yml);
-  console.log(`[OK] iOS project.yml signing applied (bundleId=${bundleId}, team=${teamId || 'none'})`);
+  let gradle = fs.readFileSync(gradlePath, 'utf-8');
+  const targetSdk = config.android.targetSdk || 35;
+  const compileSdk = config.android.compileSdk || 35;
+  const minSdk = config.android.minSdk || 24;
+  gradle = gradle.replace(/compileSdk\s*=\s*\d+/, `compileSdk = ${compileSdk}`);
+  gradle = gradle.replace(/minSdk\s*=\s*\d+/, `minSdk = ${minSdk}`);
+  gradle = gradle.replace(/targetSdk\s*=\s*\d+/, `targetSdk = ${targetSdk}`);
+  fs.writeFileSync(gradlePath, gradle);
+  console.log(
+    `[OK] Android build.gradle.kts SDK versions updated (compileSdk=${compileSdk}, minSdk=${minSdk}, targetSdk=${targetSdk})`,
+  );
 }
 
-function main () {
+function main() {
   console.log('[apply-config] Reading app.config.json...');
   const config = loadConfig();
   console.log(`[apply-config] App: ${config.app.name} v${config.app.version}`);
@@ -372,9 +327,8 @@ function main () {
   writeTauriConf(config);
   writeDistIndex(config);
   writeAndroidStrings(config);
-  writeRustConst(config);
   writeAndroidConfig(config);
-  writeIosSigning(config);
+  writeAndroidBuildGradle(config);
 
   console.log('[apply-config] Done! All platform configs updated.');
 }

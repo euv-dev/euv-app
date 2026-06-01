@@ -2,7 +2,7 @@
   "$schema": "./app.config.schema.json",
   "app": {
     "name": "Euv",
-    "identifier": "com.yudong.euv",
+    "identifier": "com.euv",
     "version": "0.1.0",
     "description": "Euv App",
     "author": "you"
@@ -10,15 +10,10 @@
   "remote": {
     "url": "https://ltpp.vip/euv",
     "baseUrl": "https://ltpp.vip/static/euv/",
-    "criticalResources": [
-      "pkg/euv.js",
-      "pkg/euv_bg.wasm"
-    ]
+    "criticalResources": ["pkg/euv.js", "pkg/euv_bg.wasm"]
   },
   "cache": {
     "directory": "euv_web_cache",
-    "fetchTimeoutSecs": 30,
-    "maxBodySizeBytes": 10485760,
     "connectTimeoutFastMs": 5000,
     "readTimeoutFastMs": 8000,
     "connectTimeoutMissMs": 15000,
@@ -45,8 +40,8 @@
   "android": {
     "namespace": "com.euv",
     "minSdk": 24,
-    "targetSdk": 36,
-    "compileSdk": 36,
+    "targetSdk": 35,
+    "compileSdk": 35,
     "keepAliveService": true,
     "notification": {
       "channelId": "euv_keep_alive",
@@ -54,11 +49,6 @@
       "title": "EUV",
       "text": "运行中"
     }
-  },
-  "ios": {
-    "bundleIdentifier": "com.yudong.euv",
-    "deploymentTarget": "14.0",
-    "teamId": "5TUTGP8PPZ"
   },
   "icons": {
     "source": "src-tauri/icons/icon.png",
@@ -68,10 +58,7 @@
     }
   },
   "build": {
-    "targets": [
-      "android",
-      "ios"
-    ],
+    "targets": ["android"],
     "signing": {
       "android": {
         "keystorePath": "keystore.jks",

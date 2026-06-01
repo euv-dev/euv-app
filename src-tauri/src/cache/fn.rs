@@ -1,159 +1,219 @@
-/// URL resolution and filesystem path mapping utilities.
-use std::path::PathBuf;
+use crate::*;
 
-/// Maps a URL to a local filesystem path within the cache directory.
-pub fn url_to_cache_path(cache_dir: &std::path::Path, url: &str) -> Option<PathBuf> {
-    let parsed = match url::Url::parse(url) {
-        Ok(p) => p,
-        Err(_) => return None,
-    };
-    let host = parsed.host_str().unwrap_or("unknown");
-    let path = parsed.path();
+/// Gets the cache directory path.
+pub(crate) fn get_cache_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, CacheError> {
+    let mut dir = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|e| CacheError::Read(format!("{}", e)))?;
+    dir.push(CACHE_DIR);
+    Ok(dir)
+}
 
-    let rel_path = if path == "/" || path.is_empty() {
-        PathBuf::from(host).join("index.html")
+/// Writes a debug marker file to prove the command was called.
+fn write_debug_marker(app_handle: &tauri::AppHandle, msg: &str) {
+    if let Ok(mut dir) = app_handle.path().app_cache_dir() {
+        dir.push("debug.log");
+        let _ = std::fs::write(&dir, msg);
+    }
+}
+
+/// Fetches a remote URL and returns (content_bytes, content_type).
+pub(crate) async fn fetch_url(url: &str) -> Result<(Vec<u8>, String), CacheError> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| CacheError::Fetch(e.to_string()))?;
+
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| CacheError::Fetch(e.to_string()))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(CacheError::Fetch(format!("HTTP {}", status)));
+    }
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| CacheError::Fetch(e.to_string()))?;
+
+    if bytes.len() > MAX_BODY_SIZE {
+        return Err(CacheError::Fetch(format!(
+            "Too large: {} bytes",
+            bytes.len()
+        )));
+    }
+
+    Ok((bytes.to_vec(), content_type))
+}
+
+/// Main function: loads the page HTML (from cache or network).
+/// Injects a <base href> tag so that relative resource URLs resolve correctly
+/// when the HTML is rendered via document.write() in the WebView.
+pub(crate) async fn load_page(app_handle: &tauri::AppHandle) -> Result<CachedPage, CacheError> {
+    println!("[EUV] load_page() started");
+    let cache_dir = get_cache_dir(app_handle)?;
+    println!("[EUV] cache_dir: {:?}", cache_dir);
+    std::fs::create_dir_all(&cache_dir).ok();
+
+    // Try to load cached HTML first
+    let index_path = cache_dir.join("index.html");
+    let (html, from_cache) = if index_path.exists() {
+        match std::fs::read_to_string(&index_path) {
+            Ok(cached_html) if !cached_html.is_empty() => {
+                println!("[EUV] loaded HTML from cache");
+                (cached_html, true)
+            }
+            _ => {
+                // Cache file corrupt, fetch fresh
+                let fresh = fetch_fresh_html(&index_path).await?;
+                (fresh, false)
+            }
+        }
     } else {
-        let clean_path = path.strip_prefix('/').unwrap_or(path);
-        if clean_path.is_empty() {
-            PathBuf::from(host).join("index.html")
-        } else {
-            PathBuf::from(host).join(clean_path)
-        }
+        // No cache, fetch from network
+        let fresh = fetch_fresh_html(&index_path).await?;
+        (fresh, false)
     };
 
-    Some(cache_dir.join(rel_path))
+    // Inject <base href> so relative URLs resolve to the remote server.
+    // This is critical for document.write() rendering on iOS.
+    let html_with_base = inject_base_href(&html);
+
+    println!("[EUV] load_page() done, from_cache={}", from_cache);
+
+    Ok(CachedPage {
+        html: html_with_base,
+        from_cache,
+        resource_count: 0,
+    })
 }
 
-/// Extracts all resource URLs from an HTML document.
-pub fn extract_resource_urls(html: &str, base_url: &str) -> Vec<(String, String)> {
-    let mut resources = Vec::new();
-    let base = match url::Url::parse(base_url) {
-        Ok(b) => b,
-        Err(_) => return resources,
-    };
+/// Injects <base href> and viewport-fit=cover into the HTML <head>.
+/// - <base href> ensures relative resource URLs resolve to the remote server.
+/// - viewport-fit=cover ensures content extends into iOS safe areas.
+fn inject_base_href(html: &str) -> String {
+    let base_tag = format!("<base href=\"{}\">", REMOTE_URL);
+    let viewport_meta = "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover\">";
 
-    let prefixes: Vec<(&str, &str, &str)> = vec![
-        ("href=\"", "\"", "link"),
-        ("href='", "'", "link"),
-        ("src=\"", "\"", "script"),
-        ("src='", "'", "script"),
-    ];
-
-    for (prefix, suffix, kind) in &prefixes {
-        let mut search_start = 0;
-        while let Some(pos) = html[search_start..].find(*prefix) {
-            let abs_pos = search_start + pos + prefix.len();
-            if let Some(end_pos) = html[abs_pos..].find(*suffix) {
-                let raw_url = &html[abs_pos..abs_pos + end_pos];
-                if !raw_url.is_empty()
-                    && !raw_url.starts_with("data:")
-                    && !raw_url.starts_with('#')
-                    && !raw_url.starts_with("javascript:")
-                {
-                    if let Ok(resolved) = base.join(raw_url) {
-                        resources.push((resolved.as_str().to_string(), kind.to_string()));
-                    }
-                }
-                search_start = abs_pos + end_pos + suffix.len();
-            } else {
-                break;
-            }
-        }
-    }
-
-    resources.dedup();
-    resources
-}
-
-/// Rewrites HTML content, replacing remote URLs with local file:// paths.
-pub fn rewrite_html_urls(html: &str, base_url: &str, cache_dir: &std::path::Path) -> String {
     let mut result = html.to_string();
-    let base = match url::Url::parse(base_url) {
-        Ok(b) => b,
-        Err(_) => return result,
-    };
 
-    let mut replacements: Vec<(String, String)> = Vec::new();
-
-    // Find all href="..." and src="..."
-    let attr_prefixes: Vec<(&str, &str)> = vec![
-        ("href=\"", "\""),
-        ("href='", "'"),
-        ("src=\"", "\""),
-        ("src='", "'"),
-    ];
-
-    for (prefix, suffix) in &attr_prefixes {
-        let mut search_start = 0;
-        while let Some(pos) = result[search_start..].find(*prefix) {
-            let abs_pos = search_start + pos + prefix.len();
-            if let Some(end_pos) = result[abs_pos..].find(*suffix) {
-                let raw_url = &result[abs_pos..abs_pos + end_pos];
-                if !raw_url.is_empty()
-                    && !raw_url.starts_with("data:")
-                    && !raw_url.starts_with('#')
-                    && !raw_url.starts_with("javascript:")
-                    && !raw_url.starts_with("file:")
-                {
-                    if let Ok(resolved) = base.join(raw_url) {
-                        if let Some(local_path) = url_to_cache_path(cache_dir, resolved.as_str()) {
-                            let local_url = format!(
-                                "file:///{}",
-                                local_path.display().to_string().replace('\\', "/")
-                            );
-                            replacements.push((raw_url.to_string(), local_url));
-                        }
-                    }
-                }
-                search_start = abs_pos + end_pos + 1;
-            } else {
-                break;
-            }
+    // Inject <base href> after <head>
+    if let Some(pos) = result.find("<head>") {
+        let insert_pos = pos + "<head>".len();
+        result.insert_str(insert_pos, &base_tag);
+    } else if let Some(pos) = result.find("<head ") {
+        if let Some(end) = result[pos..].find('>') {
+            let insert_pos = pos + end + 1;
+            result.insert_str(insert_pos, &base_tag);
+        } else {
+            result = format!("{}{}", base_tag, result);
         }
+    } else {
+        result = format!("{}{}", base_tag, result);
     }
 
-    // Also handle url(...) in inline styles
-    let css_prefixes: Vec<(&str, &str)> = vec![
-        ("url(\"", "\""),
-        ("url('", "'"),
-    ];
-
-    for (prefix, suffix) in &css_prefixes {
-        let mut search_start = 0;
-        while let Some(pos) = result[search_start..].find(*prefix) {
-            let abs_pos = search_start + pos + prefix.len();
-            if let Some(end_pos) = result[abs_pos..].find(*suffix) {
-                let raw_url = &result[abs_pos..abs_pos + end_pos];
-                if !raw_url.is_empty()
-                    && !raw_url.starts_with("data:")
-                    && !raw_url.starts_with("file:")
-                {
-                    if let Ok(resolved) = base.join(raw_url) {
-                        if let Some(local_path) = url_to_cache_path(cache_dir, resolved.as_str()) {
-                            let local_url = format!(
-                                "file:///{}",
-                                local_path.display().to_string().replace('\\', "/")
-                            );
-                            replacements.push((raw_url.to_string(), local_url));
-                        }
-                    }
-                }
-                search_start = abs_pos + end_pos + 1;
-            } else {
-                break;
+    // Ensure viewport-fit=cover is present
+    if !result.contains("viewport-fit") {
+        // Replace existing viewport meta or inject new one
+        if let Some(vp_start) = result.find("<meta name=\"viewport\"") {
+            if let Some(vp_end) = result[vp_start..].find('>') {
+                let end_pos: usize = vp_start + vp_end + 1;
+                result = format!(
+                    "{}{}{}",
+                    &result[..vp_start],
+                    viewport_meta,
+                    &result[end_pos..]
+                );
+            }
+        } else {
+            // No viewport meta found, inject after <base>
+            if let Some(base_pos) = result.find(&base_tag) {
+                let insert_pos = base_pos + base_tag.len();
+                result.insert_str(insert_pos, viewport_meta);
             }
         }
-    }
-
-    // Apply replacements - replace both "url" and 'url' forms
-    for (original, local) in replacements {
-        let with_double = format!("\"{}\"", original);
-        let with_double_new = format!("\"{}\"", local);
-        let with_single = format!("'{}'", original);
-        let with_single_new = format!("'{}'", local);
-        result = result.replace(&with_double, &with_double_new);
-        result = result.replace(&with_single, &with_single_new);
     }
 
     result
+}
+
+/// Fetches fresh HTML from the remote URL and saves it to cache.
+async fn fetch_fresh_html(index_path: &std::path::Path) -> Result<String, CacheError> {
+    println!("[EUV] fetching: {}", REMOTE_URL);
+    let (html_bytes, ct) = fetch_url(REMOTE_URL).await?;
+    println!(
+        "[EUV] fetched {} bytes, content-type: {}",
+        html_bytes.len(),
+        ct
+    );
+    let html = String::from_utf8_lossy(&html_bytes).to_string();
+
+    // Save original HTML to cache for next launch
+    if let Some(parent) = index_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(index_path, &html).map_err(|e| CacheError::Write(e.to_string()))?;
+    println!("[EUV] saved HTML to cache");
+
+    Ok(html)
+}
+
+/// Tauri command: load the cached/fresh page.
+#[tauri::command]
+pub(crate) async fn load_cached_resource(
+    app_handle: tauri::AppHandle,
+) -> Result<CachedPage, String> {
+    println!("[EUV] === load_cached_resource command called! ===");
+    write_debug_marker(
+        &app_handle,
+        &format!(
+            "command_called_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        ),
+    );
+
+    load_page(&app_handle).await.map_err(|e| {
+        write_debug_marker(&app_handle, &format!("error_{}", e));
+        e.to_string()
+    })
+}
+
+/// Background task: pre-fetch and cache the remote HTML for next launch.
+pub(crate) async fn update_cache_async(app_handle: tauri::AppHandle) {
+    println!("[EUV] background cache update started");
+    write_debug_marker(&app_handle, "background_update_started");
+    match get_cache_dir(&app_handle) {
+        Ok(cache_dir) => {
+            std::fs::create_dir_all(&cache_dir).ok();
+            let index_path = cache_dir.join("index.html");
+            match fetch_fresh_html(&index_path).await {
+                Ok(_) => {
+                    println!("[EUV] background cache update done");
+                    write_debug_marker(&app_handle, "background_done");
+                }
+                Err(e) => {
+                    println!("[EUV] background cache error: {}", e);
+                    write_debug_marker(&app_handle, &format!("background_error_{}", e));
+                }
+            }
+        }
+        Err(e) => {
+            println!("[EUV] background cache dir error: {}", e);
+        }
+    }
 }

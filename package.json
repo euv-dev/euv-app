@@ -6,9 +6,6 @@
     "icons": "python3 scripts/gen-icons.py",
     "build:android": "./build.sh android release",
     "build:android:debug": "./build.sh android debug",
-    "build:ios": "./build.sh ios release",
-    "build:ios:debug": "./build.sh ios debug",
-    "build:all": "./build.sh all release",
     "tauri": "tauri"
   },
   "dependencies": {

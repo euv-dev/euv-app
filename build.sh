@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 #
-# EUV 跨平台构建脚本
-# 用法:
-#   ./build.sh                    默认构建 Android release 包
-#   ./build.sh android            构建 Android release 包（签名 + 混淆）
-#   ./build.sh android debug      构建 Android debug 包
-#   ./build.sh ios                构建 iOS release 包
-#   ./build.sh ios debug          构建 iOS debug 包
-#   ./build.sh all                构建所有平台 release 包
+# EUV Android Build Script
+# Usage:
+#   ./build.sh                    Build Android release package (default)
+#   ./build.sh android            Build Android release package
+#   ./build.sh android debug      Build Android debug package
+#   ./build.sh release            Build Android release package
+#   ./build.sh debug              Build Android debug package
 #
 
 set -euo pipefail
@@ -15,7 +14,7 @@ set -euo pipefail
 PLATFORM="${1:-android}"
 MODE="${2:-release}"
 
-# 颜色输出
+# Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -27,45 +26,42 @@ warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 step()  { echo -e "${BLUE}[STEP]${NC} $*"; }
 
-# 切换到项目根目录
+# Switch to project root
 cd "$(dirname "$0")"
 
-# 读取配置
+# Read config
 CONFIG_FILE="app.config.json"
 if [ ! -f "$CONFIG_FILE" ]; then
-    error "未找到 $CONFIG_FILE，请确保配置文件存在"
+    error "Config file not found: $CONFIG_FILE"
 fi
 
 APP_NAME=$(node -e "console.log(require('./$CONFIG_FILE').app.name)")
 APP_VERSION=$(node -e "console.log(require('./$CONFIG_FILE').app.version)")
 APP_ID=$(node -e "console.log(require('./$CONFIG_FILE').app.identifier)")
 
-info "应用: $APP_NAME v$APP_VERSION ($APP_ID)"
+info "App: $APP_NAME v$APP_VERSION ($APP_ID)"
 
-# 校验参数
+# Validate parameters
 case "$PLATFORM" in
-    android|ios|all)
+    android)
         ;;
     release|debug)
-        # 兼容旧用法: ./build.sh release 或 ./build.sh debug
         MODE="$PLATFORM"
         PLATFORM="android"
         ;;
     -h|--help|help)
-        echo "用法: $0 [platform] [mode]"
+        echo "Usage: $0 [platform] [mode]"
         echo ""
-        echo "平台 (platform):"
-        echo "  android     构建 Android APK（默认）"
-        echo "  ios         构建 iOS IPA"
-        echo "  all         构建所有平台"
+        echo "Platform:"
+        echo "  android     Build Android APK (default)"
         echo ""
-        echo "模式 (mode):"
-        echo "  release     签名的 release 包（默认）"
-        echo "  debug       debug 包"
+        echo "Mode:"
+        echo "  release     Signed release package (default)"
+        echo "  debug       Debug package"
         exit 0
         ;;
     *)
-        error "未知平台: $PLATFORM（仅支持 android、ios、all）"
+        error "Unknown platform: $PLATFORM (only android)"
         ;;
 esac
 
@@ -73,180 +69,135 @@ case "$MODE" in
     release|debug)
         ;;
     *)
-        error "未知模式: $MODE（仅支持 release 或 debug）"
+        error "Unknown mode: $MODE (only release or debug)"
         ;;
 esac
 
-# 检查依赖
-command -v cargo >/dev/null 2>&1 || error "未找到 cargo，请先安装 Rust 工具链"
+# Check dependencies
+command -v cargo >/dev/null 2>&1 || error "cargo not found, please install Rust toolchain"
 
-# 使用 Node.js 20+
+# Use Node.js 20+
 if [ -f "$HOME/.nvm/nvm.sh" ]; then
     source "$HOME/.nvm/nvm.sh"
     nvm use 20 --silent 2>/dev/null || nvm use node --silent
 fi
-command -v npx >/dev/null 2>&1 || error "未找到 npx，请先安装 Node.js"
+command -v npx >/dev/null 2>&1 || error "npx not found, please install Node.js"
 
-# Step 1: 应用配置
-step "应用配置到各平台文件..."
+# Step 1: Apply config
+step "Applying config to platform files..."
 node scripts/apply-config.js
 
-# ===== 构建函数 =====
+# ===== Build =====
 
-build_android() {
-    local mode="$1"
-    info "开始构建 Android $mode 包..."
+info "Starting Android $MODE build..."
 
-    # 使用 Java 17（Kotlin/AGP 不兼容 Java 25）
-    export JAVA_HOME="/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home"
-    export PATH="$JAVA_HOME/bin:$PATH"
+# Use Java 17 (Kotlin/AGP incompatible with Java 25)
+export JAVA_HOME="/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home"
+export PATH="$JAVA_HOME/bin:$PATH"
 
-    # Android SDK / NDK
-    export ANDROID_HOME="${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}"
-    if [ -z "${NDK_HOME:-}" ] && [ -d "$ANDROID_HOME/ndk" ]; then
-        NDK_VER=$(ls "$ANDROID_HOME/ndk" 2>/dev/null | sort -V | tail -1)
-        export NDK_HOME="$ANDROID_HOME/ndk/$NDK_VER"
-    fi
-    [ -n "${NDK_HOME:-}" ] || error "未找到 Android NDK，请通过 sdkmanager 安装 ndk"
-    info "NDK_HOME: $NDK_HOME"
+# Android SDK / NDK
+export ANDROID_HOME="${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}"
+if [ -z "${NDK_HOME:-}" ] && [ -d "$ANDROID_HOME/ndk" ]; then
+    NDK_VER=$(ls "$ANDROID_HOME/ndk" 2>/dev/null | sort -V | tail -1)
+    export NDK_HOME="$ANDROID_HOME/ndk/$NDK_VER"
+fi
+[ -n "${NDK_HOME:-}" ] || error "Android NDK not found, install via sdkmanager"
+info "NDK_HOME: $NDK_HOME"
 
-    info "Node: $(node --version), Java: $(java -version 2>&1 | head -1)"
+info "Node: $(node --version), Java: $(java -version 2>&1 | head -1)"
 
-    BUILD_START=$(date +%s)
+BUILD_START=$(date +%s)
 
-    # 备份自定义的 RustWebViewClient.kt（tauri CLI 会覆盖 generated/ 目录）
-    GENERATED_DIR="src-tauri/gen/android/app/src/main/java/com/euv/generated"
-    BACKUP_FILE="/tmp/euv_RustWebViewClient_backup.kt"
-    cp "$GENERATED_DIR/RustWebViewClient.kt" "$BACKUP_FILE"
+# Backup custom RustWebViewClient.kt (tauri CLI overwrites generated/ directory)
+GENERATED_DIR="src-tauri/gen/android/app/src/main/java/com/euv/generated"
+BACKUP_FILE="/tmp/euv_RustWebViewClient_backup.kt"
+cp "$GENERATED_DIR/RustWebViewClient.kt" "$BACKUP_FILE"
 
-    # 运行 tauri CLI 编译 Rust + 生成 Kotlin 文件（Gradle 构建会失败，忽略）
-    if [ "$mode" = "release" ]; then
-        npx @tauri-apps/cli android build --apk 2>&1 || true
+# Run tauri CLI to compile Rust + generate Kotlin files (Gradle build will fail, ignore)
+if [ "$MODE" = "release" ]; then
+    npx @tauri-apps/cli android build --apk 2>&1 || true
+else
+    npx @tauri-apps/cli android build --apk --debug 2>&1 || true
+fi
+
+# Restore custom RustWebViewClient.kt
+cp "$BACKUP_FILE" "$GENERATED_DIR/RustWebViewClient.kt"
+info "Restored custom RustWebViewClient.kt"
+
+# Copy .so files to jniLibs for all architectures
+# Kotlin Rust.kt calls System.loadLibrary("euv_lib") which expects libeuv_lib.so
+LIB_NAME="libeuv_lib.so"
+JNI_BASE_DIR="src-tauri/gen/android/app/src/main/jniLibs"
+declare -A ARCH_MAP=(
+    ["arm64-v8a"]="aarch64-linux-android"
+    ["armeabi-v7a"]="armv7-linux-androideabi"
+    ["x86"]="i686-linux-android"
+    ["x86_64"]="x86_64-linux-android"
+)
+for ARCH in "${!ARCH_MAP[@]}"; do
+    RUST_TARGET="${ARCH_MAP[$ARCH]}"
+    JNI_DIR="$JNI_BASE_DIR/$ARCH"
+    TARGET_SO="$JNI_DIR/$LIB_NAME"
+    RUST_SO="src-tauri/target/$RUST_TARGET/$MODE/libeuv_lib.so"
+    rm -f "$TARGET_SO"
+    if [ -f "$RUST_SO" ]; then
+        cp "$RUST_SO" "$TARGET_SO"
+        info "Copied $ARCH $LIB_NAME from Rust target"
     else
-        npx @tauri-apps/cli android build --apk --debug 2>&1 || true
+        warn "$ARCH .so file not found at: $RUST_SO — APK will be missing native lib for $ARCH"
     fi
+done
 
-    # 恢复自定义的 RustWebViewClient.kt
-    cp "$BACKUP_FILE" "$GENERATED_DIR/RustWebViewClient.kt"
-    info "已恢复自定义 RustWebViewClient.kt"
+# Run Gradle build
+info "Running Gradle build..."
+ANDROID_DIR="src-tauri/gen/android"
+if [ "$MODE" = "release" ]; then
+    "$ANDROID_DIR/gradlew" --project-dir "$ANDROID_DIR" assembleUniversalRelease
+else
+    "$ANDROID_DIR/gradlew" --project-dir "$ANDROID_DIR" assembleUniversalDebug
+fi
 
-    # 清除 Kotlin 编译缓存
-    rm -rf "src-tauri/gen/android/app/build/tmp/kotlin-classes"
+BUILD_END=$(date +%s)
+BUILD_DURATION=$((BUILD_END - BUILD_START))
 
-    # 执行 Gradle 构建
-    info "执行 Gradle 构建..."
-    ANDROID_DIR="src-tauri/gen/android"
-    if [ "$mode" = "release" ]; then
-        "$ANDROID_DIR/gradlew" --project-dir "$ANDROID_DIR" assembleUniversalRelease
-    else
-        "$ANDROID_DIR/gradlew" --project-dir "$ANDROID_DIR" assembleUniversalDebug
-    fi
+# Locate output
+APK_DIR="src-tauri/gen/android/app/build/outputs/apk"
+local app_lower
+app_lower=$(printf '%s' "$APP_NAME" | tr '[:upper:]' '[:lower:]')
+if [ "$MODE" = "release" ]; then
+    APK_PATH="$APK_DIR/universal/release/app-universal-release.apk"
+    OUTPUT_NAME="${app_lower}.apk"
+else
+    APK_PATH="$APK_DIR/universal/debug/app-universal-debug.apk"
+    OUTPUT_NAME="${app_lower}-debug.apk"
+fi
 
-    BUILD_END=$(date +%s)
-    BUILD_DURATION=$((BUILD_END - BUILD_START))
+if [ -f "$APK_PATH" ]; then
+    cp "$APK_PATH" "$OUTPUT_NAME"
+    APK_SIZE=$(du -h "$OUTPUT_NAME" | cut -f1)
+    info "Android build complete! Duration: ${BUILD_DURATION}s"
+    info "Output: ./$OUTPUT_NAME"
+    info "Size: $APK_SIZE"
 
-    # 定位产物
-    APK_DIR="src-tauri/gen/android/app/build/outputs/apk"
-    # 应用名转小写（兼容 bash 3.2，避免 ${var,,}）
-    local app_lower
-    app_lower=$(printf '%s' "$APP_NAME" | tr '[:upper:]' '[:lower:]')
-    if [ "$mode" = "release" ]; then
-        APK_PATH="$APK_DIR/universal/release/app-universal-release.apk"
-        OUTPUT_NAME="${app_lower}.apk"
-    else
-        APK_PATH="$APK_DIR/universal/debug/app-universal-debug.apk"
-        OUTPUT_NAME="${app_lower}-debug.apk"
-    fi
-
-    if [ -f "$APK_PATH" ]; then
-        cp "$APK_PATH" "$OUTPUT_NAME"
-        APK_SIZE=$(du -h "$OUTPUT_NAME" | cut -f1)
-        info "Android 构建完成! 耗时 ${BUILD_DURATION}s"
-        info "产物路径: ./$OUTPUT_NAME"
-        info "文件大小: $APK_SIZE"
-
-        # 自动安装到已连接的设备
-        if command -v adb >/dev/null 2>&1; then
-            DEVICE_COUNT=$(adb devices | grep -c -w 'device' || true)
-            if [ "$DEVICE_COUNT" -gt 0 ]; then
-                info "检测到设备，正在安装..."
-                adb install -r "$OUTPUT_NAME"
-                info "安装完成!"
-            else
-                warn "未检测到已连接的设备，跳过安装"
-            fi
+    # Auto-install to connected device
+    if command -v adb >/dev/null 2>&1; then
+        DEVICE_COUNT=$(adb devices | grep -c -w 'device' || true)
+        if [ "$DEVICE_COUNT" -gt 0 ]; then
+            info "Device detected, installing..."
+            adb install -r "$OUTPUT_NAME"
+            info "Install complete!"
         else
-            warn "未找到 adb，跳过自动安装"
+            warn "No connected device detected, skipping install"
         fi
     else
-        warn "构建可能完成，但未在预期路径找到 APK"
-        find "$APK_DIR" -name "*.apk" 2>/dev/null | while read -r apk; do
-            info "  找到: $apk"
-        done
+        warn "adb not found, skipping auto-install"
     fi
-}
-
-build_ios() {
-    local mode="$1"
-    info "开始构建 iOS $mode 包..."
-
-    # 检查 macOS 环境
-    if [[ "$(uname)" != "Darwin" ]]; then
-        error "iOS 构建仅支持 macOS"
-    fi
-
-    # 检查 Xcode
-    command -v xcodebuild >/dev/null 2>&1 || error "未找到 xcodebuild，请先安装 Xcode"
-
-    BUILD_START=$(date +%s)
-
-    # 初始化 iOS 项目（如果尚未初始化）
-    if [ ! -d "src-tauri/gen/apple" ]; then
-        info "初始化 iOS 项目..."
-        npx @tauri-apps/cli ios init
-    fi
-
-    # 运行 tauri iOS 构建
-    if [ "$mode" = "release" ]; then
-        npx @tauri-apps/cli ios build
-    else
-        npx @tauri-apps/cli ios build --debug
-    fi
-
-    BUILD_END=$(date +%s)
-    BUILD_DURATION=$((BUILD_END - BUILD_START))
-
-    info "iOS 构建完成! 耗时 ${BUILD_DURATION}s"
-
-    # 查找产物
-    IPA_DIR="src-tauri/gen/apple/build"
-    if [ -d "$IPA_DIR" ]; then
-        find "$IPA_DIR" -name "*.ipa" -o -name "*.app" 2>/dev/null | while read -r artifact; do
-            info "  产物: $artifact"
-        done
-    fi
-}
-
-# ===== 执行构建 =====
-
-info "构建平台: $PLATFORM, 模式: $MODE"
-echo ""
-
-case "$PLATFORM" in
-    android)
-        build_android "$MODE"
-        ;;
-    ios)
-        build_ios "$MODE"
-        ;;
-    all)
-        step "===== 构建 Android ====="
-        build_android "$MODE"
-        echo ""
-        step "===== 构建 iOS ====="
-        build_ios "$MODE"
-        ;;
-esac
+else
+    warn "Build may have completed, but APK not found at expected path"
+    find "$APK_DIR" -name "*.apk" 2>/dev/null | while read -r apk; do
+        info "  Found: $apk"
+    done
+fi
 
 echo ""
-info "全部构建完成!"
+info "Build complete!"

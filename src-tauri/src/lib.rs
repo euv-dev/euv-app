@@ -1,11 +1,28 @@
+//! Euv-app
+//!
+//! A Tauri-based application with resource caching capabilities.
+
 mod cache;
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+use cache::*;
+
+use std::path::PathBuf;
+
+use {
+    serde::Serialize,
+    tauri::{
+        App, AppHandle, Builder, Manager, async_runtime::spawn, generate_context, generate_handler,
+    },
+};
+
+/// Initializes and runs the Tauri application.
 pub fn run() {
-    println!("[EUV] Rust run() started");
-    let result = tauri::Builder::default()
-        .setup(|app| {
-            println!("[EUV] setup() called");
+    #[cfg(target_os = "android")]
+    {
+        tauri::android_binding!(com, euv, run, tauri::wry);
+    }
+    Builder::default()
+        .setup(|app: &mut App| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -13,19 +30,13 @@ pub fn run() {
                         .build(),
                 )?;
             }
-            // Kick off background cache update
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
+            let handle: AppHandle = app.handle().clone();
+            spawn(async move {
                 cache::update_cache_async(handle).await;
             });
-            println!("[EUV] setup() done");
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![cache::load_cached_resource])
-        .run(tauri::generate_context!());
-
-    match result {
-        Ok(_) => println!("[EUV] tauri run() completed"),
-        Err(e) => println!("[EUV] tauri run() error: {:?}", e),
-    }
+        .invoke_handler(generate_handler![cache::load_cached_resource])
+        .run(generate_context!())
+        .expect("fatal: euv app failed to start");
 }
