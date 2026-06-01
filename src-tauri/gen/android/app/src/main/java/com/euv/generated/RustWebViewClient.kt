@@ -96,37 +96,36 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
             return assetLoader.shouldInterceptRequest(request.url)
         }
 
-        // Main frame request to tauri.localhost → serve optimized bootstrap HTML directly
+        // Main frame request to tauri.localhost → serve remote page from cache (offline-first)
         if (host == "tauri.localhost" && isMainFrame && url == "http://tauri.localhost/") {
-            // If main frame already loaded, this is a reload triggered by WASM app — block it
+            // If main frame already loaded, this is a reload triggered by JS — block it
             if (mainFrameLoaded) {
-                debugLog(">>> MAIN-FRAME BLOCKED (already loaded, preventing WASM-triggered reload)")
+                debugLog(">>> MAIN-FRAME BLOCKED (already loaded, preventing JS-triggered reload)")
                 return WebResourceResponse(
                     "text/html", "utf-8", 200, "OK",
                     mapOf("Cache-Control" to "no-store"),
                     ByteArrayInputStream("<!-- blocked reload -->".toByteArray())
                 )
             }
-            debugLog(">>> MAIN-FRAME serving optimized bootstrap HTML")
+            debugLog(">>> MAIN-FRAME serving remote page (offline-first)")
             interceptedState[url] = true
             mainFrameLoaded = true
-            // Trigger background refresh of remote resources
-            if (refreshedUrls.add("https://ltpp.vip/euv")) {
-                thread {
-                    try {
-                        val result = fetchAndStoreWithFinalUrl("https://ltpp.vip/euv")
-                        if (result != null) {
-                            remoteBaseUrl = result.baseUrl
-                            File(cacheDir, "base_url.txt").writeText(result.baseUrl)
-                            debugLog("MAIN-BG-OK baseUrl=${result.baseUrl}")
-                        }
-                    } catch (e: Exception) {
-                        debugLog("MAIN-BG-FAIL: ${e.message}")
-                    }
-                }
+            // Fetch the remote page (follows redirects), cache it, serve from cache
+            val mainPageResponse = serveCachedOrFetchMainPage("https://ltpp.vip/euv")
+            if (mainPageResponse != null) {
+                return mainPageResponse
             }
-            // Return optimized HTML immediately — no disk I/O, no cache lookup needed
-            return generateOptimizedHtml()
+            // If both cache and network fail, serve a minimal error/retry page
+            debugLog(">>> MAIN-FRAME no cache and no network, serving fallback")
+            val fallbackHtml = """<!DOCTYPE html><html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<style>body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#fff;color:#333}
+.c{text-align:center}button{margin-top:20px;padding:12px 24px;font-size:16px;border:none;border-radius:8px;background:#1677ff;color:#fff}</style>
+</head><body><div class="c"><p>网络不可用，请检查网络连接后重试</p><button onclick="location.reload()">重试</button></div></body></html>"""
+            val bytes = fallbackHtml.toByteArray(Charsets.UTF_8)
+            val headers = mutableMapOf("Cache-Control" to "no-store")
+            return WebResourceResponse("text/html", "utf-8", 200, "OK", headers, ByteArrayInputStream(bytes))
         }
 
         // Tauri internal domains: sub-resources → map to remote URL and cache
@@ -165,9 +164,9 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
             return response
         }
 
-        // External http/https → offline-first caching
+        // External http/https → offline-first caching for all requests
         if (url.startsWith("http://") || url.startsWith("https://")) {
-            debugLog(">>> CACHE path for $url")
+            debugLog(">>> CACHE path for $url isMainFrame=$isMainFrame")
             try {
                 val cached = serveCachedOrFetch(url)
                 if (cached != null) {
@@ -179,7 +178,7 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
             } catch (e: Exception) {
                 debugLog(">>> CACHE exception for $url: ${e.message}")
             }
-            // Return null to let WebView handle it normally
+            // Return null to let WebView handle it normally (network fallback)
             return null
         }
 
@@ -197,9 +196,12 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
         return response
     }
 
+
     /**
-     * Main page fetch: similar to serveCachedOrFetch but also resolves redirects
-     * to determine the base URL for relative resource paths.
+     * Main page fetch with offline-first support:
+     * - If cached → serve immediately from disk + background refresh
+     * - If not cached → fetch with redirect following, cache, return
+     * Also resolves and stores the final base URL for relative resource paths.
      */
     private fun serveCachedOrFetchMainPage(url: String): WebResourceResponse? {
         val dataFile = getCacheFile(url)
@@ -213,7 +215,7 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
             val encoding = extractEncoding(contentType) ?: "utf-8"
             // Restore base URL from saved file
             if (baseFile.exists()) {
-                remoteBaseUrl = baseFile.readText()
+                remoteBaseUrl = baseFile.readText().trim()
                 debugLog("MAIN-HIT restored baseUrl=$remoteBaseUrl")
             }
 
@@ -244,19 +246,19 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
             debugLog("MAIN-MISS $url")
             val result = fetchAndStoreWithFinalUrl(url)
             if (result == null) {
-                debugLog("MAIN-FETCH-NULL $url")
+                debugLog("MAIN-FETCH-NULL $url (offline and no cache)")
                 return null
             }
             remoteBaseUrl = result.baseUrl
             try { baseFile.writeText(result.baseUrl) } catch (_: Exception) {}
             debugLog("MAIN-MISS-SERVED $url baseUrl=${result.baseUrl}")
             val mimeType = extractMimeType(result.contentType)
-            val encoding = extractEncoding(result.contentType)
+            val encoding = extractEncoding(result.contentType) ?: "utf-8"
             val headers = mutableMapOf(
                 "Access-Control-Allow-Origin" to "*",
                 "Cache-Control" to "no-store"
             )
-            return WebResourceResponse(mimeType, encoding ?: "utf-8", 200, "OK", headers, ByteArrayInputStream(result.data))
+            return WebResourceResponse(mimeType, encoding, 200, "OK", headers, ByteArrayInputStream(result.data))
         }
     }
 
@@ -423,63 +425,6 @@ class RustWebViewClient(webView: RustWebView, private val context: Context): Web
         }
     }
 
-    /**
-     * Generate an optimized bootstrap HTML that:
-     * 1. Starts WASM fetch + compile immediately (no waiting for module script parsing)
-     * 2. Loads JS in parallel
-     * 3. Uses instantiateStreaming for fastest possible WASM compilation
-     * 4. Shows no loading text, just a spinner
-     *
-     * This completely replaces the remote HTML with a faster-loading equivalent.
-     */
-    private fun generateOptimizedHtml(): WebResourceResponse {
-        // No CSS animation — native splash handles the visual feedback.
-        // WASM module is cached in IndexedDB after first compile, so subsequent
-        // launches skip the expensive ~500ms compilation entirely.
-        val html = """<!DOCTYPE html><html><head>
-<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
-<title>Euv</title>
-<style>body{margin:0;padding:0;background:#fff}</style>
-</head><body>
-<div id="app"></div>
-<script>
-(function(){
-// IndexedDB cache for compiled WASM module — skips ~500ms recompilation
-var DB='euv_wasm',ST='m',K='w';
-function openDB(){return new Promise(function(r){var q=indexedDB.open(DB,1);q.onupgradeneeded=function(e){e.target.result.createObjectStore(ST)};q.onsuccess=function(e){r(e.target.result)};q.onerror=function(){r(null)}})}
-function getM(db){if(!db)return Promise.resolve(null);return new Promise(function(r){try{var t=db.transaction(ST);var q=t.objectStore(ST).get(K);q.onsuccess=function(){r(q.result||null)};q.onerror=function(){r(null)}}catch(e){r(null)}})}
-function putM(db,m){if(!db)return;try{db.transaction(ST,'readwrite').objectStore(ST).put(m,K)}catch(e){}}
-
-// Start JS module load immediately (parallel)
-var js=import('./pkg/euv.js');
-
-openDB().then(function(db){
-  return getM(db).then(function(cached){
-    if(cached){
-      // Cache hit: pass compiled Module directly to wasm-bindgen init (~5ms)
-      return js.then(function(m){return m.default(cached).then(function(){m.main()})});
-    }
-    // Cache miss: compile + store, then init
-    return WebAssembly.compileStreaming(fetch('./pkg/euv_bg.wasm')).then(function(mod){
-      putM(db,mod);
-      return js.then(function(m){return m.default(mod).then(function(){m.main()})});
-    });
-  });
-}).catch(function(){
-  // Fallback without cache
-  js.then(function(m){return m.default().then(function(){m.main()})});
-});
-})();
-</script>
-</body></html>"""
-
-        val bytes = html.toByteArray(Charsets.UTF_8)
-        val headers = mutableMapOf(
-            "Access-Control-Allow-Origin" to "*",
-            "Cache-Control" to "no-store"
-        )
-        return WebResourceResponse("text/html", "utf-8", 200, "OK", headers, ByteArrayInputStream(bytes))
-    }
 
     private fun getCacheFile(url: String) = File(cacheDir, "${sha256(url)}${extOf(url)}")
     private fun getMetaFile(url: String) = File(cacheDir, "${sha256(url)}.meta")
@@ -510,7 +455,14 @@ openDB().then(function(db){
             return result
         }
 
-        // All other links open in external browser
+        // Once the main frame has loaded (redirected from tauri.localhost),
+        // allow all HTTP/HTTPS navigation within the WebView
+        if (mainFrameLoaded && (url.startsWith("http://") || url.startsWith("https://"))) {
+            debugLog(">>> Allowing in-WebView navigation to $url")
+            return false
+        }
+
+        // Before main frame loads, open external links in browser
         try {
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -537,47 +489,33 @@ openDB().then(function(db){
     override fun onPageFinished(view: WebView, url: String) {
         debugLog(">>> onPageFinished url=$url")
         Rust.onPageLoaded((view as RustWebView).id, url)
-        // Inject a script that waits for WASM app to render, then removes native splash
-        if (url == "http://tauri.localhost/") {
-            view.evaluateJavascript("""
-                (function() {
-                    function checkReady() {
-                        var app = document.getElementById('app');
-                        if (app && app.children.length > 0) {
-                            window.__SPLASH_READY = true;
-                            return;
-                        }
-                        new MutationObserver(function(m, o) {
-                            var app = document.getElementById('app');
-                            if (app && app.children.length > 0) {
-                                window.__SPLASH_READY = true;
-                                o.disconnect();
-                            }
-                        }).observe(document.body || document.documentElement, {childList: true, subtree: true});
-                    }
-                    checkReady();
-                })();
-            """.trimIndent(), null)
-            // Poll for WASM render completion to remove native splash — start immediately
+        // The main page is served at tauri.localhost but contains remote content.
+        // Once it finishes loading, inject a check for WASM app render, then remove splash.
+        if (url == "http://tauri.localhost/" && mainFrameLoaded) {
+            debugLog(">>> Main page finished, waiting for app render to remove splash")
+            // Poll for the #app div having children (WASM app rendered)
             val handler = Handler(Looper.getMainLooper())
             val pollRunnable = object : Runnable {
+                var attempts = 0
                 override fun run() {
-                    view.evaluateJavascript("window.__SPLASH_READY === true") { result ->
-                        if (result == "true") {
-                            debugLog(">>> WASM rendered, removing native splash")
+                    attempts++
+                    view.evaluateJavascript(
+                        "(document.getElementById('app') && document.getElementById('app').children.length > 0) || document.body.children.length > 1"
+                    ) { result ->
+                        if (result == "true" || attempts > 100) {
+                            debugLog(">>> App rendered (attempts=$attempts), removing splash")
                             (context as? MainActivity)?.removeSplash()
                         } else {
-                            handler.postDelayed(this, 50)
+                            handler.postDelayed(this, 100)
                         }
                     }
                 }
             }
-            handler.postDelayed(pollRunnable, 100)
-            // Fallback: remove splash after 10s max
+            handler.postDelayed(pollRunnable, 200)
+            // Fallback: remove splash after 8s max
             handler.postDelayed({
-                debugLog(">>> Splash timeout, force removing")
                 (context as? MainActivity)?.removeSplash()
-            }, 10000)
+            }, 8000)
         }
     }
 

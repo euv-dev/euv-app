@@ -26,8 +26,15 @@ class MainActivity : TauriActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         Log.d("EUV_CACHE", "MainActivity.onCreate()")
-        // Reset WebViewClient state so the main frame can load again after process reuse
-        RustWebViewClient.resetMainFrameState()
+        // Reset WebViewClient static state so the main frame can load again after process reuse
+        try {
+            val field = RustWebViewClient::class.java.getDeclaredField("mainFrameLoaded")
+            field.isAccessible = true
+            field.set(null, false)
+            Log.d("EUV_CACHE", "Reset mainFrameLoaded via reflection")
+        } catch (e: Exception) {
+            Log.d("EUV_CACHE", "mainFrameLoaded field not found (expected on vanilla Tauri)")
+        }
         // Set window background to white BEFORE super.onCreate to avoid black flash
         window.setBackgroundDrawable(ColorDrawable(Color.WHITE))
         super.onCreate(savedInstanceState)
