@@ -13,7 +13,11 @@ gen/android/app/src/main/assets/
 src-tauri/target/
 *.apk
 *.aab
+
+# Secrets
 keystore.jks
 keystore.properties
 local.properties
-build.ps1
+
+# Debug artifacts
+screenshot_*.png
