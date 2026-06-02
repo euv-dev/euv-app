@@ -20,7 +20,7 @@ import android.webkit.WebView
 import android.webkit.WebChromeClient
 import android.webkit.ConsoleMessage
 import android.widget.FrameLayout
-import android.widget.ProgressBar
+import android.widget.ImageView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
@@ -52,6 +52,12 @@ class MainActivity : TauriActivity() {
         }
         window.setBackgroundDrawable(ColorDrawable(Color.parseColor(AppConfig.BACKGROUND_COLOR)))
         super.onCreate(savedInstanceState)
+
+        // Add splash overlay IMMEDIATELY after super.onCreate() so it covers the
+        // white gap between Android system splash dismissal and WebView rendering.
+        // This must happen here (not in onWebViewCreate) to avoid the flash.
+        addSplashOverlay()
+
         if (AppConfig.IMMERSIVE_MODE) {
             enableImmersiveMode()
         }
@@ -98,13 +104,16 @@ class MainActivity : TauriActivity() {
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
             elevation = 100f
-            val spinner = ProgressBar(context).apply {
+
+            // Logo image centered
+            val logo = ImageView(context).apply {
+                setImageResource(R.mipmap.ic_launcher)
                 layoutParams = FrameLayout.LayoutParams(
-                    96, 96, Gravity.CENTER
+                    240, 240, Gravity.CENTER
                 )
-                isIndeterminate = true
+                scaleType = ImageView.ScaleType.FIT_CENTER
             }
-            addView(spinner)
+            addView(logo)
         }
         rootView.addView(splash)
         splashView = splash
@@ -202,77 +211,75 @@ class MainActivity : TauriActivity() {
         // Add JavaScript interface for opening external links
         webView.addJavascriptInterface(ExternalLinkHandler(), "NativeApp")
 
-        Handler(Looper.getMainLooper()).post {
-            addSplashOverlay()
-        }
-
-        // Poll WebView URL: once navigation reaches euv.localhost, the WASM app is loaded
+        // Poll WebView: wait for euv.localhost page to fully render before removing splash.
+        // We check that the URL has navigated to euv.localhost AND that the page body has
+        // meaningful content (WASM app has rendered), to avoid a white flash.
         val handler = Handler(Looper.getMainLooper())
         val pollRunnable = object : Runnable {
             override fun run() {
                 val currentUrl = webView.url ?: ""
-                Log.d("EUV_CACHE", "Splash poll: url=$currentUrl")
                 if (currentUrl.contains("euv.localhost")) {
-                    Log.d("EUV_CACHE", "WASM app URL detected, scheduling splash removal")
-                    // Give a brief moment for rendering to start
-                    handler.postDelayed({ removeSplash() }, 300)
+                    // Check if WASM app has rendered content into the page
+                    webView.evaluateJavascript(
+                        "(document.querySelector('canvas') !== null || document.body.children.length > 1).toString()"
+                    ) { result ->
+                        val rendered = result?.trim('"') == "true"
+                        Log.d("EUV_CACHE", "Splash poll: url=$currentUrl, rendered=$rendered")
+                        if (rendered) {
+                            Log.d("EUV_CACHE", "WASM app rendered, removing splash")
+                            removeSplash()
+                            injectExternalLinkInterceptor(webView)
+                        } else {
+                            handler.postDelayed(this, 100)
+                        }
+                    }
                 } else {
-                    handler.postDelayed(this, 500)
+                    handler.postDelayed(this, 200)
                 }
             }
         }
-        handler.postDelayed(pollRunnable, 1000)
-
-        // Inject JS to intercept all link clicks and open them externally
-        // This runs after the WASM app page loads
-        val injectJsRunnable = object : Runnable {
-            override fun run() {
-                val currentUrl = webView.url ?: ""
-                if (currentUrl.contains("euv.localhost")) {
-                    val js = """
-                        (function() {
-                            if (window.__externalLinkInterceptorInstalled) return;
-                            window.__externalLinkInterceptorInstalled = true;
-                            document.addEventListener('click', function(e) {
-                                var target = e.target;
-                                while (target && target.tagName !== 'A') {
-                                    target = target.parentElement;
-                                }
-                                if (target && target.href) {
-                                    var href = target.href;
-                                    if (href.indexOf('euv.localhost') === -1 &&
-                                        href.indexOf('euv://') !== 0 &&
-                                        href.indexOf('tauri.localhost') === -1 &&
-                                        (href.indexOf('http://') === 0 || href.indexOf('https://') === 0)) {
-                                        e.preventDefault();
-                                        e.stopPropagation();
-                                        window.NativeApp.openUrl(href);
-                                    }
-                                }
-                            }, true);
-                            // Also handle window.open
-                            var originalOpen = window.open;
-                            window.open = function(url, target, features) {
-                                if (url && url.indexOf('http') === 0 &&
-                                    url.indexOf('euv.localhost') === -1 &&
-                                    url.indexOf('tauri.localhost') === -1) {
-                                    window.NativeApp.openUrl(url);
-                                    return null;
-                                }
-                                return originalOpen.call(window, url, target, features);
-                            };
-                            console.log('[EUV] External link interceptor installed');
-                        })();
-                    """.trimIndent()
-                    webView.evaluateJavascript(js, null)
-                    Log.d("EUV_CACHE", "External link interceptor JS injected")
-                } else {
-                    handler.postDelayed(this, 500)
-                }
-            }
-        }
-        handler.postDelayed(injectJsRunnable, 2000)
+        handler.postDelayed(pollRunnable, 300)
 
         Log.d("EUV_CACHE", "WebView setup done at ${System.currentTimeMillis()}")
+    }
+
+    private fun injectExternalLinkInterceptor(webView: WebView) {
+        val js = """
+            (function() {
+                if (window.__externalLinkInterceptorInstalled) return;
+                window.__externalLinkInterceptorInstalled = true;
+                document.addEventListener('click', function(e) {
+                    var target = e.target;
+                    while (target && target.tagName !== 'A') {
+                        target = target.parentElement;
+                    }
+                    if (target && target.href) {
+                        var href = target.href;
+                        if (href.indexOf('euv.localhost') === -1 &&
+                            href.indexOf('euv://') !== 0 &&
+                            href.indexOf('tauri.localhost') === -1 &&
+                            (href.indexOf('http://') === 0 || href.indexOf('https://') === 0)) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            window.NativeApp.openUrl(href);
+                        }
+                    }
+                }, true);
+                // Also handle window.open
+                var originalOpen = window.open;
+                window.open = function(url, target, features) {
+                    if (url && url.indexOf('http') === 0 &&
+                        url.indexOf('euv.localhost') === -1 &&
+                        url.indexOf('tauri.localhost') === -1) {
+                        window.NativeApp.openUrl(url);
+                        return null;
+                    }
+                    return originalOpen.call(window, url, target, features);
+                };
+                console.log('[EUV] External link interceptor installed');
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js, null)
+        Log.d("EUV_CACHE", "External link interceptor JS injected")
     }
 }

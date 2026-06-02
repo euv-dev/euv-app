@@ -95,12 +95,9 @@ function getLoadingHtml(config) {
 /**
  * Generate the index.html that Tauri loads as the frontend entry point.
  *
- * Flow:
- * 1. Show splash/loading screen
- * 2. Invoke `load_cached_resource` to check if local cache exists
- * 3. If cache exists → navigate to euv://localhost/index.html (custom protocol serves from cache)
- * 4. If no cache → show loading spinner while waiting, Rust background task fetches and saves
- *    → poll every 1s until cache becomes available, then navigate
+ * This is a minimal page — on Android the native Kotlin splash overlay handles
+ * logo display, so we only need the JS that polls for cache readiness and then
+ * navigates to the cached app served via the custom protocol.
  *
  * Can be overridden by setting ui.indexHtml in app.config.json.
  */
@@ -109,115 +106,36 @@ function getIndexHtml(config) {
     return config.ui.indexHtml;
   }
   const bg = config.ui.backgroundColor;
-  const spinnerColor = config.ui.loadingSpinnerColor || '#1677ff';
-  const trackColor = config.ui.loadingSpinnerTrackColor || '#e0e0e0';
-  const fadeDuration = config.ui.splashFadeDurationMs || 300;
 
-  // Read the splash icon and inline as base64
-  const splashIconPath = path.join(
-    ROOT,
-    'src-tauri',
-    'icons',
-    'splash-icon.png',
-  );
-  let logoDataUri = '';
-  if (fs.existsSync(splashIconPath)) {
-    const iconBase64 = fs.readFileSync(splashIconPath).toString('base64');
-    logoDataUri = 'data:image/png;base64,' + iconBase64;
-  }
-
-  // Determine the custom protocol URL based on platform
-  // Windows/Android: https://euv.localhost/index.html
-  // macOS/iOS/Linux: euv://localhost/index.html
   return `<!doctype html>
 <html>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>${config.app.name}</title>
-    <style>
-      * { margin: 0; padding: 0; box-sizing: border-box; }
-      html, body { width: 100%; height: 100%; overflow: hidden; background: ${bg}; }
-      #splash {
-        position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-        display: flex; flex-direction: column; align-items: center; justify-content: center;
-        background: ${bg}; z-index: 99999;
-        transition: opacity ${fadeDuration}ms ease-out;
-        padding-top: env(safe-area-inset-top);
-        padding-bottom: env(safe-area-inset-bottom);
-        padding-left: env(safe-area-inset-left);
-        padding-right: env(safe-area-inset-right);
-      }
-      #splash.fade-out { opacity: 0; pointer-events: none; }
-      #splash-logo {
-        width: 120px; height: 120px; margin-bottom: 32px;
-      }
-      #splash-logo img {
-        width: 100%; height: 100%;
-        object-fit: contain;
-      }
-      .loader {
-        width: 40px; height: 40px;
-      }
-      #app { width: 100%; height: 100%; }
-    </style>
+    <style>html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:${bg}}</style>
   </head>
   <body>
-    <div id="splash">
-      <div id="splash-logo">
-        <img src="${logoDataUri}" alt="${config.app.name}" />
-      </div>
-      <svg class="loader" viewBox="0 0 50 50" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="25" cy="25" r="20" fill="none" stroke="${trackColor}" stroke-width="4" />
-        <circle cx="25" cy="25" r="20" fill="none" stroke="${spinnerColor}" stroke-width="4" stroke-linecap="round" stroke-dasharray="80 200" stroke-dashoffset="0">
-          <animateTransform attributeName="transform" type="rotate" from="0 25 25" to="360 25 25" dur="1s" repeatCount="indefinite" />
-        </circle>
-      </svg>
-    </div>
-    <div id="app"></div>
     <script>
       (function() {
-        var FADE_DURATION = ${fadeDuration};
-        var POLL_INTERVAL = 1000;
-
         function getSchemeUrl(path) {
           var ua = navigator.userAgent || navigator.platform || '';
-          var isWindowsOrAndroid = /Win|Android/.test(ua);
-          return isWindowsOrAndroid
+          return /Win|Android/.test(ua)
             ? 'https://euv.localhost/' + path
             : 'euv://localhost/' + path;
         }
-
-        function navigateToCache() {
-          var url = getSchemeUrl('index.html');
-          window.location.replace(url);
-        }
-
-        function removeSplashAndNavigate() {
-          var s = document.getElementById('splash');
-          if (s) {
-            s.classList.add('fade-out');
-            setTimeout(function() { s.remove(); }, FADE_DURATION);
-          }
-          setTimeout(navigateToCache, 50);
-        }
-
-        var pollCount = 0;
 
         function pollForCache() {
           window.__TAURI_INTERNALS__.invoke('load_cached_resource')
             .then(function(result) {
               if (result && result.from_cache) {
-                removeSplashAndNavigate();
+                window.location.replace(getSchemeUrl('index.html'));
               } else {
-                pollCount++;
-                var delay = pollCount < 3 ? 500 : POLL_INTERVAL;
-                setTimeout(pollForCache, delay);
+                setTimeout(pollForCache, 500);
               }
             })
-            .catch(function(err) {
-              console.warn('[EUV] load_cached_resource error:', err);
-              setTimeout(pollForCache, POLL_INTERVAL);
+            .catch(function() {
+              setTimeout(pollForCache, 1000);
             });
         }
 
