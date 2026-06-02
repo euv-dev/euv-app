@@ -17,8 +17,11 @@ serde = { version = "1", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-log = "2"
-reqwest = { version = "0.13.4", features = [
-    "rustls",
+reqwest = { version = "0.12", features = [
+    "rustls-tls-webpki-roots",
+    "gzip",
+    "brotli",
+    "deflate",
 ], default-features = false }
 url = "2"
 tokio = { version = "1", features = ["time"] }

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -14,6 +15,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebChromeClient
 import android.webkit.ConsoleMessage
@@ -152,6 +154,23 @@ class MainActivity : TauriActivity() {
         }
     }
 
+    /**
+     * JavaScript interface to allow the WebView content to open external links
+     * in the system browser.
+     */
+    inner class ExternalLinkHandler {
+        @JavascriptInterface
+        fun openUrl(url: String) {
+            Log.d("EUV_CACHE", "Opening external link: $url")
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                startActivity(intent)
+            } catch (e: Exception) {
+                Log.e("EUV_CACHE", "Failed to open external link: $url", e)
+            }
+        }
+    }
+
     override fun onWebViewCreate(webView: WebView) {
         Log.d("EUV_CACHE", "onWebViewCreate() at ${System.currentTimeMillis()}")
         super.onWebViewCreate(webView)
@@ -179,9 +198,81 @@ class MainActivity : TauriActivity() {
                 return true
             }
         }
+
+        // Add JavaScript interface for opening external links
+        webView.addJavascriptInterface(ExternalLinkHandler(), "NativeApp")
+
         Handler(Looper.getMainLooper()).post {
             addSplashOverlay()
         }
+
+        // Poll WebView URL: once navigation reaches euv.localhost, the WASM app is loaded
+        val handler = Handler(Looper.getMainLooper())
+        val pollRunnable = object : Runnable {
+            override fun run() {
+                val currentUrl = webView.url ?: ""
+                Log.d("EUV_CACHE", "Splash poll: url=$currentUrl")
+                if (currentUrl.contains("euv.localhost")) {
+                    Log.d("EUV_CACHE", "WASM app URL detected, scheduling splash removal")
+                    // Give a brief moment for rendering to start
+                    handler.postDelayed({ removeSplash() }, 300)
+                } else {
+                    handler.postDelayed(this, 500)
+                }
+            }
+        }
+        handler.postDelayed(pollRunnable, 1000)
+
+        // Inject JS to intercept all link clicks and open them externally
+        // This runs after the WASM app page loads
+        val injectJsRunnable = object : Runnable {
+            override fun run() {
+                val currentUrl = webView.url ?: ""
+                if (currentUrl.contains("euv.localhost")) {
+                    val js = """
+                        (function() {
+                            if (window.__externalLinkInterceptorInstalled) return;
+                            window.__externalLinkInterceptorInstalled = true;
+                            document.addEventListener('click', function(e) {
+                                var target = e.target;
+                                while (target && target.tagName !== 'A') {
+                                    target = target.parentElement;
+                                }
+                                if (target && target.href) {
+                                    var href = target.href;
+                                    if (href.indexOf('euv.localhost') === -1 &&
+                                        href.indexOf('euv://') !== 0 &&
+                                        href.indexOf('tauri.localhost') === -1 &&
+                                        (href.indexOf('http://') === 0 || href.indexOf('https://') === 0)) {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        window.NativeApp.openUrl(href);
+                                    }
+                                }
+                            }, true);
+                            // Also handle window.open
+                            var originalOpen = window.open;
+                            window.open = function(url, target, features) {
+                                if (url && url.indexOf('http') === 0 &&
+                                    url.indexOf('euv.localhost') === -1 &&
+                                    url.indexOf('tauri.localhost') === -1) {
+                                    window.NativeApp.openUrl(url);
+                                    return null;
+                                }
+                                return originalOpen.call(window, url, target, features);
+                            };
+                            console.log('[EUV] External link interceptor installed');
+                        })();
+                    """.trimIndent()
+                    webView.evaluateJavascript(js, null)
+                    Log.d("EUV_CACHE", "External link interceptor JS injected")
+                } else {
+                    handler.postDelayed(this, 500)
+                }
+            }
+        }
+        handler.postDelayed(injectJsRunnable, 2000)
+
         Log.d("EUV_CACHE", "WebView setup done at ${System.currentTimeMillis()}")
     }
 }

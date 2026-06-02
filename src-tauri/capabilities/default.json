@@ -3,5 +3,12 @@
   "identifier": "default",
   "description": "enables the default permissions",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "allow-load-cached-resource"
+  ],
+  "platforms": ["android", "linux", "macOS", "windows"],
+  "remote": {
+    "urls": ["http://*", "https://*"]
+  }
 }

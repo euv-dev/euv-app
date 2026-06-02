@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"enables the default permissions","local":true,"windows":["main"],"permissions":["core:default"]}}
+{"default":{"identifier":"default","description":"enables the default permissions","remote":{"urls":["http://*","https://*"]},"local":true,"windows":["main"],"permissions":["core:default","allow-load-cached-resource"],"platforms":["android","linux","macOS","windows"]}}

@@ -6,7 +6,7 @@
   "build": {
     "frontendDist": "../dist",
     "beforeDevCommand": "",
-    "beforeBuildCommand": "node scripts/apply-config.js"
+    "beforeBuildCommand": "node scripts/prefetch-cache.js && node scripts/apply-config.js"
   },
   "app": {
     "withGlobalTauri": true,
@@ -16,7 +16,8 @@
         "width": 1280,
         "height": 800,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "useHttpsScheme": true
       }
     ],
     "security": {

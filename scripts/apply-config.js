@@ -35,7 +35,7 @@ function writeTauriConf(config) {
     build: {
       frontendDist: '../dist',
       beforeDevCommand: '',
-      beforeBuildCommand: 'node scripts/apply-config.js',
+      beforeBuildCommand: 'node scripts/prefetch-cache.js && node scripts/apply-config.js',
     },
     app: {
       withGlobalTauri: true,
@@ -46,6 +46,7 @@ function writeTauriConf(config) {
           height: config.ui.window.height,
           resizable: config.ui.window.resizable,
           fullscreen: config.ui.window.fullscreen,
+          useHttpsScheme: true,
         },
       ],
       security: {

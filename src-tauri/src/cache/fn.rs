@@ -94,12 +94,47 @@ pub(crate) fn load_cached_html(app_handle: &tauri::AppHandle) -> Option<String> 
     None
 }
 
+/// Populates the runtime cache from bundled (embedded) resources.
+/// Returns true if bundled resources were available and deployed.
+pub(crate) fn deploy_bundled_cache(app_handle: &tauri::AppHandle) -> bool {
+    let bundled_files = crate::cache::bundled::BUNDLED_FILES;
+    if bundled_files.is_empty() {
+        log::info!("[EUV] no bundled cache resources available");
+        return false;
+    }
+    let cache_dir: PathBuf = match get_cache_dir(app_handle) {
+        Ok(dir) => dir,
+        Err(e) => {
+            log::error!("[EUV] failed to get cache dir for bundled deploy: {}", e);
+            return false;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+        log::error!("[EUV] failed to create cache dir: {}", e);
+        return false;
+    }
+    let mut count: usize = 0;
+    for (rel_path, data) in bundled_files {
+        let target_path: PathBuf = cache_dir.join(rel_path);
+        if let Some(parent) = target_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        if let Err(e) = std::fs::write(&target_path, data) {
+            log::warn!("[EUV] failed to write bundled file {}: {}", rel_path, e);
+        } else {
+            count += 1;
+        }
+    }
+    log::info!("[EUV] deployed {} bundled cache files", count);
+    count > 0
+}
+
 /// Determines the MIME type based on file extension.
 pub(crate) fn mime_type_for_path(path: &str) -> &'static str {
     let lower: &str = &path.to_lowercase();
     if lower.ends_with(".html") || lower.ends_with(".htm") {
         "text/html"
-    } else if lower.ends_with(".js") {
+    } else if lower.ends_with(".js") || lower.ends_with(".mjs") {
         "application/javascript"
     } else if lower.ends_with(".wasm") {
         "application/wasm"
@@ -145,6 +180,7 @@ pub(crate) fn handle_euv_scheme(
 ) -> http::Response<Cow<'static, [u8]>> {
     let uri: &http::uri::Uri = request.uri();
     let path: &str = uri.path();
+    log::info!("[EUV] handle_euv_scheme called: method={} uri={}", request.method(), uri);
     let path_trimmed: &str = path.trim_start_matches('/');
     let path_decoded: String = percent_encoding::percent_decode_str(path_trimmed)
         .decode_utf8_lossy()
@@ -164,9 +200,11 @@ pub(crate) fn handle_euv_scheme(
     } else {
         cache_dir.join(&path_decoded)
     };
+    log::info!("[EUV] handle_euv_scheme: looking for file at {:?}", file_path);
     match std::fs::read(&file_path) {
         Ok(data) => {
             let mime: &str = mime_type_for_path(&path_decoded);
+            log::info!("[EUV] handle_euv_scheme: serving {} ({} bytes, mime={})", path_decoded, data.len(), mime);
             let mut builder: http::response::Builder = http::Response::builder()
                 .status(http::StatusCode::OK)
                 .header("Content-Type", mime)
@@ -252,6 +290,8 @@ async fn fetch_linked_resources(cache_dir: &std::path::Path, html: &str, skip_ex
     extract_attr_values(html, "script", "src", &mut resource_paths);
     extract_attr_values(html, "link", "href", &mut resource_paths);
     extract_attr_values(html, "img", "src", &mut resource_paths);
+    // Also extract ES module imports: import ... from './path'
+    extract_module_imports(html, &mut resource_paths);
     let base_url: String = REMOTE_BASE_URL.trim_end_matches('/').to_string();
     for relative_path in resource_paths {
         if relative_path.starts_with("data:")
@@ -261,8 +301,11 @@ async fn fetch_linked_resources(cache_dir: &std::path::Path, html: &str, skip_ex
         {
             continue;
         }
-        let remote_url: String = format!("{}/{}", base_url, relative_path.trim_start_matches('/'));
-        let local_path: PathBuf = cache_dir.join(relative_path.trim_start_matches('/'));
+        let clean_path: &str = relative_path
+            .trim_start_matches('/')
+            .trim_start_matches("./");
+        let remote_url: String = format!("{}/{}", base_url, clean_path);
+        let local_path: PathBuf = cache_dir.join(clean_path);
         if skip_existing && local_path.exists() {
             continue;
         }
@@ -272,15 +315,37 @@ async fn fetch_linked_resources(cache_dir: &std::path::Path, html: &str, skip_ex
         match fetch_url(&remote_url).await {
             Ok((data, _ct, _final_url)) => {
                 if let Err(e) = std::fs::write(&local_path, &data) {
-                    log::warn!("[EUV] failed to write resource {}: {}", relative_path, e);
+                    log::warn!("[EUV] failed to write resource {}: {}", clean_path, e);
                 } else {
-                    log::info!("[EUV] cached resource: {}", relative_path);
+                    log::info!("[EUV] cached resource: {}", clean_path);
                 }
             }
             Err(e) => {
-                log::warn!("[EUV] failed to fetch resource {}: {}", relative_path, e);
+                log::warn!("[EUV] failed to fetch resource {}: {}", clean_path, e);
             }
         }
+    }
+}
+
+/// Extracts ES module import paths from HTML script content.
+fn extract_module_imports(html: &str, results: &mut Vec<String>) {
+    // Match: import ... from './path' or import ... from "./path"
+    let mut search_from: usize = 0;
+    while search_from < html.len() {
+        let from_pos: usize = match html[search_from..].find("from") {
+            Some(pos) => search_from + pos,
+            None => break,
+        };
+        let after_from: &str = &html[from_pos + 4..];
+        let trimmed: &str = after_from.trim_start();
+        let value: &str = extract_quoted_value(trimmed);
+        if !value.is_empty()
+            && (value.starts_with("./") || value.starts_with("../"))
+            && !results.contains(&value.to_string())
+        {
+            results.push(value.to_string());
+        }
+        search_from = from_pos + 4;
     }
 }
 
@@ -318,13 +383,13 @@ fn extract_quoted_value(s: &str) -> &str {
         .and_then(|r| Some((r, r.find('"')?)))
     {
         let (rest, end) = rest;
-        return &rest[..=end];
+        return &rest[..end];
     } else if let Some(rest) = trimmed
         .strip_prefix('\'')
         .and_then(|r| Some((r, r.find('\'')?)))
     {
         let (rest, end) = rest;
-        return &rest[..=end];
+        return &rest[..end];
     }
     ""
 }

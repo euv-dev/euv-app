@@ -1,0 +1,6 @@
+# Default permissions for the euv-app.
+# This grants access to all app-specific commands.
+
+[default]
+description = "Default permissions for euv-app commands"
+permissions = ["allow-load-cached-resource"]

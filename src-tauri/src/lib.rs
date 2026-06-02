@@ -1,6 +1,7 @@
 //! Euv-app
 //!
 //! A Tauri-based application with resource caching capabilities.
+//! Supports offline-first launch via bundled resources embedded at build time.
 
 mod cache;
 
@@ -12,7 +13,7 @@ use std::path::PathBuf;
 use {
     serde::Serialize,
     tauri::{
-        App, AppHandle, Builder, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder,
+        App, AppHandle, Builder, Manager, RunEvent,
         async_runtime::spawn, generate_context, generate_handler,
     },
 };
@@ -34,38 +35,42 @@ pub fn run() {
     }
     Builder::default()
         .setup(|app: &mut App| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .build(),
+            )?;
             let handle: AppHandle = app.handle().clone();
+
+            // Check if runtime cache exists
             let has_cache: bool = cache::load_cached_html(&handle).is_some();
-            if has_cache {
-                log::info!("[EUV] cache found, loading from cache directly");
-                let scheme_url: String = get_scheme_url("index.html");
-                let _window: tauri::WebviewWindow = WebviewWindowBuilder::new(
-                    app,
-                    "main",
-                    WebviewUrl::External(scheme_url.parse().unwrap()),
-                )
-                .title("Euv")
-                .inner_size(1280.0, 800.0)
-                .resizable(true)
-                .build()?;
+
+            if !has_cache {
+                // No runtime cache — try to deploy bundled (built-in) resources
+                log::info!("[EUV] no runtime cache, deploying bundled resources");
+                let deployed: bool = cache::deploy_bundled_cache(&handle);
+                if deployed {
+                    log::info!("[EUV] bundled cache deployed successfully");
+                } else {
+                    log::info!("[EUV] no bundled cache available, will fetch from network");
+                }
+            }
+
+            // Re-check after potential bundled deploy
+            let has_cache_now: bool = cache::load_cached_html(&handle).is_some();
+
+            if has_cache_now {
+                // Cache available — the loading page (dist/index.html) will poll
+                // load_cached_resource, find cache ready, and navigate to euv://
+                log::info!("[EUV] cache available, frontend will navigate when ready");
+
+                // Background: async update cache from network
                 spawn(async move {
                     cache::update_cache_async(handle).await;
                 });
             } else {
-                log::info!("[EUV] no cache, starting with loading page");
-                let _window: tauri::WebviewWindow =
-                    WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                        .title("Euv")
-                        .inner_size(1280.0, 800.0)
-                        .resizable(true)
-                        .build()?;
+                // No cache at all — loading page will poll until cache is fetched
+                log::info!("[EUV] no cache, starting network fetch");
                 let handle_for_fetch: AppHandle = app.handle().clone();
                 spawn(async move {
                     cache::initial_fetch_and_notify(handle_for_fetch).await;

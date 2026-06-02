@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "scripts": {
     "config": "node scripts/apply-config.js",
+    "prefetch": "node scripts/prefetch-cache.js",
     "icons": "python3 scripts/gen-icons.py",
     "build:android": "./build.sh android release",
     "build:android:debug": "./build.sh android debug",
