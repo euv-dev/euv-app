@@ -1,6 +1,7 @@
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 /// Walk a directory recursively and return all file paths relative to `base`.
 fn walk_dir(dir: &Path, base: &Path, results: &mut Vec<PathBuf>) {
@@ -32,7 +33,7 @@ fn main() {
         walk_dir(&bundled_cache_dir, &bundled_cache_dir, &mut files);
 
         // Filter out the manifest file itself
-        files.retain(|f| f.to_str().map_or(true, |s| s != "_manifest.json"));
+        files.retain(|f| f.to_str() != Some("_manifest.json"));
 
         let mut code = String::new();
         code.push_str("/// Auto-generated bundled cache data. Do not edit.\n");

@@ -99,7 +99,7 @@ case "$(uname -s)" in
     *)        HOST_OS="unknown" ;;
 esac
 
-# Java 17 — auto-detect from JAVA_HOME or common install locations
+# Java 17+ — auto-detect from JAVA_HOME or common install locations
 if [ -z "${JAVA_HOME:-}" ]; then
     JAVA_CANDIDATES=()
     if [ "$HOST_OS" = "mac" ]; then
@@ -112,9 +112,12 @@ if [ -z "${JAVA_HOME:-}" ]; then
         )
     elif [ "$HOST_OS" = "win" ]; then
         # Windows (Git Bash / MSYS2) — scan common install dirs
-        for d in "/c/Program Files/Eclipse Adoptium" "/c/Program Files/Java" "/c/Program Files/Zulu"; do
+        JAVA_CANDIDATES+=(
+            "/c/Program Files/Android/Android Studio/jbr"
+        )
+        for d in "/c/Program Files/Eclipse Adoptium" "/c/Program Files/Java" "/c/Program Files/Zulu" "/c/software"; do
             if [ -d "$d" ]; then
-                for jdk in "$d"/jdk-17*  "$d"/temurin-17* "$d"/zulu-17*; do
+                for jdk in "$d"/jdk-1[789]* "$d"/jdk-2[0-9]* "$d"/temurin-1[789]* "$d"/temurin-2[0-9]* "$d"/zulu-1[789]* "$d"/zulu-2[0-9]* "$d"/java_jdk_*; do
                     [ -d "$jdk" ] && JAVA_CANDIDATES+=("$jdk")
                 done
             fi
@@ -134,8 +137,9 @@ if [ -z "${JAVA_HOME:-}" ]; then
         fi
     done
 fi
-[ -n "${JAVA_HOME:-}" ] && [ -d "$JAVA_HOME" ] || error "JAVA_HOME not set and Java 17 not found. Install JDK 17 or set JAVA_HOME."
+[ -n "${JAVA_HOME:-}" ] && [ -d "$JAVA_HOME" ] || error "JAVA_HOME not set and no JDK (17+) found. Install JDK 17+ or set JAVA_HOME."
 export PATH="$JAVA_HOME/bin:$PATH"
+JAVA_HOME_WIN=$(cygpath -w "$JAVA_HOME" 2>/dev/null || echo "$JAVA_HOME")
 
 # Android SDK — auto-detect from ANDROID_HOME or common locations
 if [ -z "${ANDROID_HOME:-}" ]; then
@@ -225,9 +229,9 @@ done
 info "Running Gradle build..."
 ANDROID_DIR="src-tauri/gen/android"
 if [ "$MODE" = "release" ]; then
-    "$ANDROID_DIR/gradlew" --project-dir "$ANDROID_DIR" assembleUniversalRelease
+    "$ANDROID_DIR/gradlew" --project-dir "$ANDROID_DIR" -Dorg.gradle.java.home="$JAVA_HOME_WIN" assembleUniversalRelease
 else
-    "$ANDROID_DIR/gradlew" --project-dir "$ANDROID_DIR" assembleUniversalDebug
+    "$ANDROID_DIR/gradlew" --project-dir "$ANDROID_DIR" -Dorg.gradle.java.home="$JAVA_HOME_WIN" assembleUniversalDebug
 fi
 
 BUILD_END=$(date +%s)

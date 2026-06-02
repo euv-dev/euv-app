@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use {
     serde::Serialize,
     tauri::{
-        App, AppHandle, Builder, Manager, RunEvent,
-        async_runtime::spawn, generate_context, generate_handler,
+        App, AppHandle, Builder, Manager, RunEvent, async_runtime::spawn, generate_context,
+        generate_handler,
     },
 };
 
@@ -84,25 +84,9 @@ pub fn run() {
         .invoke_handler(generate_handler![load_cached_resource])
         .build(generate_context!())
         .expect("fatal: euv app failed to start")
-        .run(|_app_handle: &AppHandle, event: RunEvent| {
+        .run(|_: &AppHandle, event: RunEvent| {
             if let RunEvent::Exit = event {
                 log::info!("[EUV] app exiting");
             }
         });
-}
-
-/// Builds the custom scheme URL for a given path.
-pub(crate) fn get_scheme_url(path: &str) -> String {
-    #[cfg(target_os = "android")]
-    {
-        format!("https://euv.localhost/{}", path)
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        if cfg!(target_os = "windows") {
-            format!("https://euv.localhost/{}", path)
-        } else {
-            format!("euv://localhost/{}", path)
-        }
-    }
 }
