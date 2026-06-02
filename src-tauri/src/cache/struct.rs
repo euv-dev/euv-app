@@ -1,10 +1,14 @@
-/// Error types for cache operations.
+use serde::Serialize;
+
 #[derive(Debug)]
 pub(crate) enum CacheError {
-    /// Error occurred during network fetch.
     Fetch(String),
-    /// Error occurred during file write.
     Write(String),
-    /// Error occurred during file read.
     Read(String),
+}
+
+#[derive(Serialize)]
+pub(crate) struct CachedPage {
+    pub(crate) from_cache: bool,
+    pub(crate) remote_url: String,
 }

@@ -215,10 +215,6 @@ ${criticalResources}
     )
 
     const val CACHE_DIR = "${config.cache.directory}"
-    const val CONNECT_TIMEOUT_FAST = ${config.cache.connectTimeoutFastMs}
-    const val READ_TIMEOUT_FAST = ${config.cache.readTimeoutFastMs}
-    const val CONNECT_TIMEOUT_MISS = ${config.cache.connectTimeoutMissMs}
-    const val READ_TIMEOUT_MISS = ${config.cache.readTimeoutMissMs}
     const val MAX_REDIRECTS = ${config.cache.maxRedirects}
 
     const val BACKGROUND_COLOR = "${config.ui.backgroundColor}"

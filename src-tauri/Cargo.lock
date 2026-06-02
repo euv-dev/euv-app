@@ -883,7 +883,6 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-log",
  "tokio",
- "url",
 ]
 
 [[package]]

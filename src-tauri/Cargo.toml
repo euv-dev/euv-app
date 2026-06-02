@@ -10,9 +10,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }
+serde_json = "1"
 
 [dependencies]
-serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.11.2", features = [] }
@@ -23,8 +23,7 @@ reqwest = { version = "0.12", features = [
     "brotli",
     "deflate",
 ], default-features = false }
-url = "2"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "fs"] }
 http = "1"
 percent-encoding = "2"
 

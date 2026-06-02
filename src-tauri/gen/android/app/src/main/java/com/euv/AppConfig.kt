@@ -9,10 +9,6 @@ object AppConfig {
     )
 
     const val CACHE_DIR = "euv_web_cache"
-    const val CONNECT_TIMEOUT_FAST = 5000
-    const val READ_TIMEOUT_FAST = 8000
-    const val CONNECT_TIMEOUT_MISS = 15000
-    const val READ_TIMEOUT_MISS = 20000
     const val MAX_REDIRECTS = 10
 
     const val BACKGROUND_COLOR = "#FFFFFF"

@@ -14,10 +14,6 @@
   },
   "cache": {
     "directory": "euv_web_cache",
-    "connectTimeoutFastMs": 5000,
-    "readTimeoutFastMs": 8000,
-    "connectTimeoutMissMs": 15000,
-    "readTimeoutMissMs": 20000,
     "maxRedirects": 10
   },
   "ui": {
