@@ -54,9 +54,7 @@ function downloadUrl(url, maxRedirects = 10) {
           return resolve(downloadUrl(redirectUrl, maxRedirects - 1));
         }
         if (res.statusCode !== 200) {
-          return reject(
-            new Error(`HTTP ${res.statusCode} for ${url}`),
-          );
+          return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
         }
         // Handle content-encoding (decompress if needed)
         let stream = res;

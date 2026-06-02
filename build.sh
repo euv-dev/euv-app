@@ -28,6 +28,7 @@ step()  { echo -e "${BLUE}[STEP]${NC} $*"; }
 
 # Switch to project root
 cd "$(dirname "$0")"
+PROJECT_ROOT="$(pwd)"
 
 # Read config
 CONFIG_FILE="app.config.json"
@@ -99,75 +100,29 @@ case "$(uname -s)" in
     *)        HOST_OS="unknown" ;;
 esac
 
-# Java 17+ — auto-detect from JAVA_HOME or common install locations
-if [ -z "${JAVA_HOME:-}" ]; then
-    JAVA_CANDIDATES=()
-    if [ "$HOST_OS" = "mac" ]; then
-        JAVA_CANDIDATES+=(
-            "$(/usr/libexec/java_home -v 17 2>/dev/null || true)"
-            "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home"
-            "/Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home"
-            "/Library/Java/JavaVirtualMachines/adoptopenjdk-17.jdk/Contents/Home"
-            "/Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home"
-        )
-    elif [ "$HOST_OS" = "win" ]; then
-        # Windows (Git Bash / MSYS2) — scan common install dirs
-        JAVA_CANDIDATES+=(
-            "/c/Program Files/Android/Android Studio/jbr"
-        )
-        for d in "/c/Program Files/Eclipse Adoptium" "/c/Program Files/Java" "/c/Program Files/Zulu" "/c/software"; do
-            if [ -d "$d" ]; then
-                for jdk in "$d"/jdk-1[789]* "$d"/jdk-2[0-9]* "$d"/temurin-1[789]* "$d"/temurin-2[0-9]* "$d"/zulu-1[789]* "$d"/zulu-2[0-9]* "$d"/java_jdk_*; do
-                    [ -d "$jdk" ] && JAVA_CANDIDATES+=("$jdk")
-                done
-            fi
-        done
-    else
-        # Linux
-        JAVA_CANDIDATES+=(
-            "/usr/lib/jvm/java-17-openjdk-amd64"
-            "/usr/lib/jvm/java-17-openjdk"
-            "/usr/lib/jvm/temurin-17-jdk-amd64"
-        )
-    fi
-    for candidate in "${JAVA_CANDIDATES[@]}"; do
-        if [ -n "$candidate" ] && [ -d "$candidate" ]; then
-            export JAVA_HOME="$candidate"
-            break
-        fi
-    done
+# Java — use project-local sdk/jdk, auto-download if missing
+export JAVA_HOME="$PROJECT_ROOT/sdk/jdk"
+if [ ! -x "$JAVA_HOME/bin/java" ] && [ ! -x "$JAVA_HOME/bin/java.exe" ]; then
+    info "JDK not found in sdk/jdk/, auto-downloading..."
+    bash "$PROJECT_ROOT/scripts/setup-sdk.sh" jdk
 fi
-[ -n "${JAVA_HOME:-}" ] && [ -d "$JAVA_HOME" ] || error "JAVA_HOME not set and no JDK (17+) found. Install JDK 17+ or set JAVA_HOME."
+if [ ! -x "$JAVA_HOME/bin/java" ] && [ ! -x "$JAVA_HOME/bin/java.exe" ]; then
+    error "JDK auto-download failed. Run ./scripts/setup-sdk.sh jdk manually."
+fi
+info "Using JDK: sdk/jdk/"
 export PATH="$JAVA_HOME/bin:$PATH"
 JAVA_HOME_WIN=$(cygpath -w "$JAVA_HOME" 2>/dev/null || echo "$JAVA_HOME")
 
-# Android SDK — auto-detect from ANDROID_HOME or common locations
-if [ -z "${ANDROID_HOME:-}" ]; then
-    SDK_CANDIDATES=()
-    if [ "$HOST_OS" = "mac" ]; then
-        SDK_CANDIDATES+=(
-            "$HOME/Library/Android/sdk"
-            "/opt/homebrew/share/android-commandlinetools"
-        )
-    elif [ "$HOST_OS" = "win" ]; then
-        SDK_CANDIDATES+=(
-            "$LOCALAPPDATA/Android/Sdk"
-            "$HOME/AppData/Local/Android/Sdk"
-        )
-    else
-        SDK_CANDIDATES+=(
-            "$HOME/Android/Sdk"
-            "/usr/local/share/android-commandlinetools"
-        )
-    fi
-    for candidate in "${SDK_CANDIDATES[@]}"; do
-        if [ -n "$candidate" ] && [ -d "$candidate" ]; then
-            export ANDROID_HOME="$candidate"
-            break
-        fi
-    done
+# Android SDK — use project-local sdk/android, auto-download if missing
+export ANDROID_HOME="$PROJECT_ROOT/sdk/android"
+if [ ! -d "$ANDROID_HOME/platforms" ]; then
+    info "Android SDK not found in sdk/android/, auto-downloading..."
+    bash "$PROJECT_ROOT/scripts/setup-sdk.sh" android
 fi
-[ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME" ] || error "ANDROID_HOME not set and Android SDK not found."
+if [ ! -d "$ANDROID_HOME/platforms" ]; then
+    error "Android SDK auto-download failed. Run ./scripts/setup-sdk.sh android manually."
+fi
+info "Using Android SDK: sdk/android/"
 
 # Android NDK — auto-detect latest version
 if [ -z "${NDK_HOME:-}" ] && [ -d "$ANDROID_HOME/ndk" ]; then
@@ -177,6 +132,9 @@ if [ -z "${NDK_HOME:-}" ] && [ -d "$ANDROID_HOME/ndk" ]; then
     fi
 fi
 [ -n "${NDK_HOME:-}" ] || error "Android NDK not found, install via sdkmanager"
+# Write local.properties with resolved paths for Gradle
+ANDROID_HOME_WIN=$(cygpath -w "$ANDROID_HOME" 2>/dev/null || echo "$ANDROID_HOME")
+echo "sdk.dir=${ANDROID_HOME_WIN//\\/\\\\}" > src-tauri/gen/android/local.properties
 info "JAVA_HOME: $JAVA_HOME"
 info "ANDROID_HOME: $ANDROID_HOME"
 info "NDK_HOME: $NDK_HOME"

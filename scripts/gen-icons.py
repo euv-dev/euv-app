@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-"""
-gen-icons.py — 从 app.config.json 读取图标源文件路径，生成所有平台图标。
-
-用法:
-    python3 scripts/gen-icons.py [--source path/to/icon.png]
-
-如果不指定 --source，则从 app.config.json 的 icons.source 字段读取。
-"""
-
 import json
 import os
 import sys
@@ -15,22 +5,26 @@ import struct
 import io
 import argparse
 
+
 def load_config():
-    config_path = os.path.join(os.path.dirname(__file__), '..', 'app.config.json')
+    config_path = os.path.join(os.path.dirname(__file__), "..", "app.config.json")
     config_path = os.path.abspath(config_path)
-    with open(config_path, 'r') as f:
+    with open(config_path, "r") as f:
         return json.load(f)
 
+
 def main():
-    parser = argparse.ArgumentParser(description='Generate app icons from source image')
-    parser.add_argument('--source', '-s', help='Source icon image path (overrides app.config.json)')
+    parser = argparse.ArgumentParser(description="Generate app icons from source image")
+    parser.add_argument(
+        "--source", "-s", help="Source icon image path (overrides app.config.json)"
+    )
     args = parser.parse_args()
 
     config = load_config()
-    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
     # Determine source image
-    source = args.source or os.path.join(root_dir, config['icons']['source'])
+    source = args.source or os.path.join(root_dir, config["icons"]["source"])
     if not os.path.exists(source):
         print(f"[ERROR] Source icon not found: {source}")
         sys.exit(1)
@@ -45,7 +39,7 @@ def main():
     print(f"[INFO] Source: {source} ({im.size[0]}x{im.size[1]})")
 
     # ===== Tauri Desktop Icons =====
-    tauri_icons_dir = os.path.join(root_dir, 'src-tauri', 'icons')
+    tauri_icons_dir = os.path.join(root_dir, "src-tauri", "icons")
     os.makedirs(tauri_icons_dir, exist_ok=True)
 
     png_sizes = {
@@ -86,12 +80,18 @@ def main():
     # macOS .icns
     def icns_png_type(size_px, scale=1):
         table = {
-            (16, 1): "icp4", (16, 2): "ic11",
-            (32, 1): "icp5", (32, 2): "ic12",
-            (64, 1): "icp6", (64, 2): "ic13",
-            (128, 1): "ic07", (128, 2): "ic14",
-            (256, 1): "ic08", (256, 2): "ic1a",
-            (512, 1): "ic09", (512, 2): "ic1b",
+            (16, 1): "icp4",
+            (16, 2): "ic11",
+            (32, 1): "icp5",
+            (32, 2): "ic12",
+            (64, 1): "icp6",
+            (64, 2): "ic13",
+            (128, 1): "ic07",
+            (128, 2): "ic14",
+            (256, 1): "ic08",
+            (256, 2): "ic1a",
+            (512, 1): "ic09",
+            (512, 2): "ic1b",
             (1024, 1): "ic10",
         }
         return table.get((size_px, scale))
@@ -103,9 +103,18 @@ def main():
 
     icns_entries = []
     icns_specs = [
-        (16, 1), (16, 2), (32, 1), (32, 2),
-        (64, 1), (64, 2), (128, 1), (128, 2),
-        (256, 1), (256, 2), (512, 1), (512, 2),
+        (16, 1),
+        (16, 2),
+        (32, 1),
+        (32, 2),
+        (64, 1),
+        (64, 2),
+        (128, 1),
+        (128, 2),
+        (256, 1),
+        (256, 2),
+        (512, 1),
+        (512, 2),
         (1024, 1),
     ]
 
@@ -130,14 +139,36 @@ def main():
     print(f"  icon.icns ({total_len} bytes)")
 
     # ===== Android Icons =====
-    android_res_dir = os.path.join(root_dir, 'src-tauri', 'gen', 'android', 'app', 'src', 'main', 'res')
+    android_res_dir = os.path.join(
+        root_dir, "src-tauri", "gen", "android", "app", "src", "main", "res"
+    )
 
     android_sizes = {
-        "mipmap-mdpi": {"ic_launcher.png": 48, "ic_launcher_round.png": 48, "ic_launcher_foreground.png": 108},
-        "mipmap-hdpi": {"ic_launcher.png": 72, "ic_launcher_round.png": 72, "ic_launcher_foreground.png": 162},
-        "mipmap-xhdpi": {"ic_launcher.png": 96, "ic_launcher_round.png": 96, "ic_launcher_foreground.png": 216},
-        "mipmap-xxhdpi": {"ic_launcher.png": 144, "ic_launcher_round.png": 144, "ic_launcher_foreground.png": 324},
-        "mipmap-xxxhdpi": {"ic_launcher.png": 192, "ic_launcher_round.png": 192, "ic_launcher_foreground.png": 432},
+        "mipmap-mdpi": {
+            "ic_launcher.png": 48,
+            "ic_launcher_round.png": 48,
+            "ic_launcher_foreground.png": 108,
+        },
+        "mipmap-hdpi": {
+            "ic_launcher.png": 72,
+            "ic_launcher_round.png": 72,
+            "ic_launcher_foreground.png": 162,
+        },
+        "mipmap-xhdpi": {
+            "ic_launcher.png": 96,
+            "ic_launcher_round.png": 96,
+            "ic_launcher_foreground.png": 216,
+        },
+        "mipmap-xxhdpi": {
+            "ic_launcher.png": 144,
+            "ic_launcher_round.png": 144,
+            "ic_launcher_foreground.png": 324,
+        },
+        "mipmap-xxxhdpi": {
+            "ic_launcher.png": 192,
+            "ic_launcher_round.png": 192,
+            "ic_launcher_foreground.png": 432,
+        },
     }
 
     print("\n[STEP] Generating Android icons...")
@@ -151,18 +182,32 @@ def main():
 
     # Play Store icon
     play_icon = im.resize((512, 512), Image.LANCZOS)
-    play_icon.save(os.path.join(android_res_dir, "mipmap-xxxhdpi", "ic_launcher_web.png"), "PNG")
+    play_icon.save(
+        os.path.join(android_res_dir, "mipmap-xxxhdpi", "ic_launcher_web.png"), "PNG"
+    )
     print(f"  mipmap-xxxhdpi/ic_launcher_web.png (512x512)")
 
     # ===== iOS Icons (if iOS target is configured) =====
-    if 'ios' in config.get('build', {}).get('targets', []):
-        ios_assets_dir = os.path.join(root_dir, 'src-tauri', 'gen', 'apple', 'Assets.xcassets', 'AppIcon.appiconset')
+    if "ios" in config.get("build", {}).get("targets", []):
+        ios_assets_dir = os.path.join(
+            root_dir,
+            "src-tauri",
+            "gen",
+            "apple",
+            "Assets.xcassets",
+            "AppIcon.appiconset",
+        )
         if os.path.exists(os.path.dirname(ios_assets_dir)):
             os.makedirs(ios_assets_dir, exist_ok=True)
             print("\n[STEP] Generating iOS icons...")
             ios_sizes = [
-                (20, [1, 2, 3]), (29, [1, 2, 3]), (40, [1, 2, 3]),
-                (60, [2, 3]), (76, [1, 2]), (83.5, [2]), (1024, [1]),
+                (20, [1, 2, 3]),
+                (29, [1, 2, 3]),
+                (40, [1, 2, 3]),
+                (60, [2, 3]),
+                (76, [1, 2]),
+                (83.5, [2]),
+                (1024, [1]),
             ]
             contents_images = []
             for base_size, scales in ios_sizes:
@@ -171,26 +216,31 @@ def main():
                     filename = f"app_icon_{actual}x{actual}.png"
                     resized = im.resize((actual, actual), Image.LANCZOS)
                     resized.save(os.path.join(ios_assets_dir, filename), "PNG")
-                    contents_images.append({
-                        "filename": filename,
-                        "idiom": "universal",
-                        "scale": f"{scale}x",
-                        "size": f"{base_size}x{base_size}"
-                    })
+                    contents_images.append(
+                        {
+                            "filename": filename,
+                            "idiom": "universal",
+                            "scale": f"{scale}x",
+                            "size": f"{base_size}x{base_size}",
+                        }
+                    )
                     print(f"  {filename} ({actual}x{actual})")
 
             # Write Contents.json
             contents = {
                 "images": contents_images,
-                "info": {"author": "gen-icons.py", "version": 1}
+                "info": {"author": "gen-icons.py", "version": 1},
             }
-            with open(os.path.join(ios_assets_dir, "Contents.json"), 'w') as f:
+            with open(os.path.join(ios_assets_dir, "Contents.json"), "w") as f:
                 json.dump(contents, f, indent=2)
             print(f"  Contents.json written")
         else:
-            print("\n[SKIP] iOS assets directory not found (run 'tauri ios init' first)")
+            print(
+                "\n[SKIP] iOS assets directory not found (run 'tauri ios init' first)"
+            )
 
     print("\n[DONE] All icons generated successfully!")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
