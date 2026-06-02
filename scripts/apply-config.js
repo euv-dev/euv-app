@@ -207,19 +207,13 @@ function writeAndroidConfig(config) {
 
   const kt = `package com.euv
 
-/**
- * Auto-generated from app.config.json — do not edit manually.
- * Run: node scripts/apply-config.js
- */
 object AppConfig {
-    // Remote
     const val REMOTE_URL = "${config.remote.url}"
     const val REMOTE_BASE_URL = "${config.remote.baseUrl}"
     val CRITICAL_SUBRESOURCES = listOf(
 ${criticalResources}
     )
 
-    // Cache
     const val CACHE_DIR = "${config.cache.directory}"
     const val CONNECT_TIMEOUT_FAST = ${config.cache.connectTimeoutFastMs}
     const val READ_TIMEOUT_FAST = ${config.cache.readTimeoutFastMs}
@@ -227,19 +221,17 @@ ${criticalResources}
     const val READ_TIMEOUT_MISS = ${config.cache.readTimeoutMissMs}
     const val MAX_REDIRECTS = ${config.cache.maxRedirects}
 
-    // UI
     const val BACKGROUND_COLOR = "${config.ui.backgroundColor}"
     const val SPLASH_FADE_DURATION_MS = ${config.ui.splashFadeDurationMs}L
     const val SPLASH_MAX_WAIT_MS = ${config.ui.splashMaxWaitMs}L
     const val IMMERSIVE_MODE = ${config.ui.immersiveMode}
+    const val ANTI_ALIASING = ${config.ui.antiAliasing ?? false}
+    const val MAX_FRAME_RATE_ENABLED = ${config.ui.maxFrameRateEnabled ?? false}
 
-    // Loading HTML — shown when offline and no cache available
     val LOADING_HTML = """${loadingHtmlKt}"""
 
-    // Index HTML — the frontend entry point loaded by Tauri
     val INDEX_HTML = """${indexHtmlKt}"""
 
-    // Android
     const val KEEP_ALIVE_SERVICE = ${config.android.keepAliveService}
     const val NOTIFICATION_CHANNEL_ID = "${config.android.notification.channelId}"
     const val NOTIFICATION_CHANNEL_NAME = "${config.android.notification.channelName}"
@@ -265,8 +257,8 @@ function writeAndroidBuildGradle(config) {
     return;
   }
   let gradle = fs.readFileSync(gradlePath, 'utf-8');
-  const targetSdk = config.android.targetSdk || 35;
-  const compileSdk = config.android.compileSdk || 35;
+  const targetSdk = config.android.targetSdk || 36;
+  const compileSdk = config.android.compileSdk || 36;
   const minSdk = config.android.minSdk || 24;
   gradle = gradle.replace(/compileSdk\s*=\s*\d+/, `compileSdk = ${compileSdk}`);
   gradle = gradle.replace(/minSdk\s*=\s*\d+/, `minSdk = ${minSdk}`);

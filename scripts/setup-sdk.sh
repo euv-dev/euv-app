@@ -198,9 +198,9 @@ download_android_sdk() {
 
     info "Installing required SDK components (this may take a while)..."
     "$sdkmanager" \
-        "platforms;android-35" \
-        "build-tools;35.0.0" \
-        "ndk;27.2.12479018" \
+        "platforms;android-36" \
+        "build-tools;36.0.0" \
+        "ndk;28.0.13004108" \
         "platform-tools"
 
     info "Android SDK installed successfully at sdk/android/"

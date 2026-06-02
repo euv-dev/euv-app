@@ -27,6 +27,8 @@
     "splashFadeDurationMs": 300,
     "splashMaxWaitMs": 5000,
     "immersiveMode": true,
+    "antiAliasing": true,
+    "maxFrameRateEnabled": true,
     "loadingHtml": "",
     "indexHtml": "",
     "window": {
@@ -40,14 +42,14 @@
   "android": {
     "namespace": "com.euv",
     "minSdk": 24,
-    "targetSdk": 35,
-    "compileSdk": 35,
+    "targetSdk": 36,
+    "compileSdk": 36,
     "keepAliveService": true,
     "notification": {
       "channelId": "euv_keep_alive",
-      "channelName": "后台运行",
+      "channelName": "Background Service",
       "title": "EUV",
-      "text": "运行中"
+      "text": "Running"
     }
   },
   "icons": {

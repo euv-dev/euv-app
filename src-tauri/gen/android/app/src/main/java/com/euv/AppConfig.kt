@@ -1,11 +1,6 @@
 package com.euv
 
-/**
- * Auto-generated from app.config.json — do not edit manually.
- * Run: node scripts/apply-config.js
- */
 object AppConfig {
-    // Remote
     const val REMOTE_URL = "https://ltpp.vip/euv"
     const val REMOTE_BASE_URL = "https://ltpp.vip/static/euv/"
     val CRITICAL_SUBRESOURCES = listOf(
@@ -13,7 +8,6 @@ object AppConfig {
         "pkg/euv_bg.wasm"
     )
 
-    // Cache
     const val CACHE_DIR = "euv_web_cache"
     const val CONNECT_TIMEOUT_FAST = 5000
     const val READ_TIMEOUT_FAST = 8000
@@ -21,13 +15,13 @@ object AppConfig {
     const val READ_TIMEOUT_MISS = 20000
     const val MAX_REDIRECTS = 10
 
-    // UI
     const val BACKGROUND_COLOR = "#FFFFFF"
     const val SPLASH_FADE_DURATION_MS = 300L
     const val SPLASH_MAX_WAIT_MS = 5000L
     const val IMMERSIVE_MODE = true
+    const val ANTI_ALIASING = true
+    const val MAX_FRAME_RATE_ENABLED = true
 
-    // Loading HTML — shown when offline and no cache available
     val LOADING_HTML = """<!DOCTYPE html><html><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -37,7 +31,6 @@ object AppConfig {
 </style>
 </head><body><svg class="loader" viewBox="0 0 50 50" xmlns="http://www.w3.org/2000/svg"><circle cx="25" cy="25" r="20" fill="none" stroke="#e0e0e0" stroke-width="4"/><circle cx="25" cy="25" r="20" fill="none" stroke="#1677ff" stroke-width="4" stroke-linecap="round" stroke-dasharray="80 200" stroke-dashoffset="0"><animateTransform attributeName="transform" type="rotate" from="0 25 25" to="360 25 25" dur="1s" repeatCount="indefinite"/></circle></svg></body></html>"""
 
-    // Index HTML — the frontend entry point loaded by Tauri
     val INDEX_HTML = """<!doctype html>
 <html>
   <head>
@@ -77,10 +70,9 @@ object AppConfig {
 </html>
 """
 
-    // Android
     const val KEEP_ALIVE_SERVICE = true
     const val NOTIFICATION_CHANNEL_ID = "euv_keep_alive"
-    const val NOTIFICATION_CHANNEL_NAME = "后台运行"
+    const val NOTIFICATION_CHANNEL_NAME = "Background Service"
     const val NOTIFICATION_TITLE = "EUV"
-    const val NOTIFICATION_TEXT = "运行中"
+    const val NOTIFICATION_TEXT = "Running"
 }

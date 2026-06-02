@@ -14,6 +14,8 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.graphics.Paint
+import android.view.SurfaceControl
 import android.view.WindowManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -61,6 +63,7 @@ class MainActivity : TauriActivity() {
         if (AppConfig.IMMERSIVE_MODE) {
             enableImmersiveMode()
         }
+        setMaxFrameRate()
         if (AppConfig.KEEP_ALIVE_SERVICE) {
             startKeepAliveServiceSafely()
         }
@@ -161,6 +164,61 @@ class MainActivity : TauriActivity() {
         if (hasFocus && AppConfig.IMMERSIVE_MODE) {
             enableImmersiveMode()
         }
+        if (hasFocus) {
+            setMaxFrameRate()
+        }
+    }
+
+    private fun setMaxFrameRate() {
+        if (!AppConfig.MAX_FRAME_RATE_ENABLED) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val display = display ?: return
+            val supportedModes = display.supportedModes
+            val maxRefreshMode = supportedModes.maxByOrNull { it.refreshRate }
+            if (maxRefreshMode != null) {
+                val params: WindowManager.LayoutParams = window.attributes
+                params.preferredDisplayModeId = maxRefreshMode.modeId
+                window.attributes = params
+                Log.d("EUV_CACHE", "Set preferred display mode to ${maxRefreshMode.refreshRate}Hz (modeId=${maxRefreshMode.modeId})")
+            }
+            try {
+                val surfaceControl = window.decorView.rootSurfaceControl
+                if (surfaceControl != null && maxRefreshMode != null) {
+                    val setFrameRateMethod = surfaceControl.javaClass.getMethod(
+                        "setFrameRate",
+                        Float::class.javaPrimitiveType,
+                        Int::class.javaPrimitiveType,
+                        Int::class.javaPrimitiveType
+                    )
+                    val frameRateCompatibilityFixedSource = SurfaceControl::class.java
+                        .getDeclaredField("FRAME_RATE_COMPATIBILITY_FIXED_SOURCE")
+                        .getInt(null)
+                    val changeFrameRateOnlyIfSeamless = SurfaceControl::class.java
+                        .getDeclaredField("CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS")
+                        .getInt(null)
+                    setFrameRateMethod.invoke(
+                        surfaceControl,
+                        maxRefreshMode.refreshRate,
+                        frameRateCompatibilityFixedSource,
+                        changeFrameRateOnlyIfSeamless
+                    )
+                    Log.d("EUV_CACHE", "Set frame rate to ${maxRefreshMode.refreshRate}fps via SurfaceControl")
+                }
+            } catch (e: Exception) {
+                Log.w("EUV_CACHE", "SurfaceControl.setFrameRate failed: ${e.message}")
+            }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            @Suppress("DEPRECATION")
+            val display = windowManager.defaultDisplay
+            val supportedModes = display.supportedModes
+            val maxRefreshMode = supportedModes.maxByOrNull { it.refreshRate }
+            if (maxRefreshMode != null) {
+                val params: WindowManager.LayoutParams = window.attributes
+                params.preferredDisplayModeId = maxRefreshMode.modeId
+                window.attributes = params
+                Log.d("EUV_CACHE", "Set preferred display mode to ${maxRefreshMode.refreshRate}Hz (modeId=${maxRefreshMode.modeId}, API <31)")
+            }
+        }
     }
 
     /**
@@ -199,13 +257,37 @@ class MainActivity : TauriActivity() {
             loadsImagesAutomatically = true
             cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
         }
-        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        if (AppConfig.ANTI_ALIASING) {
+            val paint: Paint = Paint().apply {
+                isAntiAlias = true
+                isFilterBitmap = true
+                isDither = true
+                isSubpixelText = true
+            }
+            webView.setLayerType(View.LAYER_TYPE_HARDWARE, paint)
+        } else {
+            webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        }
         webView.setBackgroundColor(Color.parseColor(AppConfig.BACKGROUND_COLOR))
         webView.webChromeClient = object : WebChromeClient() {
             override fun onConsoleMessage(msg: ConsoleMessage): Boolean {
                 Log.d("JSConsole", "${msg.message()} [line ${msg.lineNumber()}]")
                 return true
             }
+        }
+
+        // Inject CSS anti-aliasing and text rendering optimizations
+        if (AppConfig.ANTI_ALIASING) {
+            webView.evaluateJavascript("""
+                (function() {
+                    var style = document.createElement('style');
+                    style.textContent = '
+                        * { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
+                        canvas { image-rendering: auto; }
+                    ';
+                    document.head.appendChild(style);
+                })();
+            """.trimIndent(), null)
         }
 
         // Add JavaScript interface for opening external links
