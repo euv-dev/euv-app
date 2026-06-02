@@ -5,6 +5,7 @@
 /.vscode
 node_modules
 .DS_Store
+bundled-cache
 
 # Build artifacts
 gen/android/build/
