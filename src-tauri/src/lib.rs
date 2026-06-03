@@ -1,5 +1,19 @@
 include!(concat!(env!("OUT_DIR"), "/bundled_cache_data.rs"));
 
+macro_rules! euv_log {
+    ($($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        log::info!("{}", msg);
+        #[cfg(debug_assertions)]
+        {
+            if let Some(handle) = APP_HANDLE.get() {
+                use tauri::Emitter;
+                let _ = handle.emit("euv://debug-log", msg);
+            }
+        }
+    }};
+}
+
 mod cache;
 
 use cache::*;
@@ -35,17 +49,19 @@ pub fn run() {
                     .build(),
             )?;
             let handle: AppHandle = app.handle().clone();
+            #[cfg(debug_assertions)]
+            let _ = APP_HANDLE.set(handle.clone());
             ensure_serving_version_sync(&handle);
             spawn(async move {
                 if load_cached_html(&handle).await.is_none() {
-                    log::info!("[EUV] no cache, deploying bundled");
+                    euv_log!("[EUV] no cache, deploying bundled");
                     deploy_bundled_cache(&handle).await;
                 }
                 if load_cached_html(&handle).await.is_some() {
-                    log::info!("[EUV] cache ready, background update");
+                    euv_log!("[EUV] cache ready, background update");
                     update_cache_async(handle).await;
                 } else {
-                    log::info!("[EUV] no cache, initial fetch");
+                    euv_log!("[EUV] no cache, initial fetch");
                     initial_fetch_and_notify(handle).await;
                 }
             });

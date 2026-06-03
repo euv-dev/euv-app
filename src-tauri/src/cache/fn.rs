@@ -25,6 +25,31 @@ pub(crate) fn set_serving_version(version: &str) {
     }
 }
 
+pub(crate) fn get_serving_source() -> String {
+    SERVING_SOURCE
+        .get()
+        .and_then(|mutex: &Mutex<String>| {
+            mutex
+                .lock()
+                .ok()
+                .map(|guard: std::sync::MutexGuard<String>| guard.clone())
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+pub(crate) fn set_serving_source(source: &str) {
+    match SERVING_SOURCE.get() {
+        Some(mutex) => {
+            if let Ok(mut guard) = mutex.lock() {
+                *guard = source.to_string();
+            }
+        }
+        None => {
+            let _ = SERVING_SOURCE.set(Mutex::new(source.to_string()));
+        }
+    }
+}
+
 pub(crate) fn get_cache_root(app_handle: &AppHandle) -> Result<PathBuf, CacheError> {
     use tauri::Manager;
     let mut cache_directory: PathBuf = app_handle
@@ -89,7 +114,7 @@ async fn switch_active_version(cache_root: &Path, version_name: &str) -> Result<
     rename(&temporary, &pointer)
         .await
         .map_err(|error: std::io::Error| CacheError::Write(error.to_string()))?;
-    log::info!("[EUV] switched active: {}", version_name);
+    euv_log!("[EUV] switched active: {}", version_name);
     Ok(())
 }
 
@@ -121,7 +146,7 @@ async fn cleanup_old_versions(cache_root: &Path, current: &str) {
     let to_remove: usize = versions.len() - max_old;
     for name in &versions[..to_remove] {
         remove_dir_all(cache_root.join(name)).await.ok();
-        log::info!("[EUV] removed old version: {}", name);
+        euv_log!("[EUV] removed old version: {}", name);
     }
 }
 
@@ -214,7 +239,8 @@ pub(crate) async fn deploy_bundled_cache(app_handle: &AppHandle) -> bool {
     {
         return false;
     }
-    log::info!("[EUV] deployed {} bundled files", count);
+    set_serving_source("bundled");
+    euv_log!("[EUV] deployed {} bundled files", count);
     true
 }
 
@@ -237,7 +263,7 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
 }
 
 pub(crate) async fn initial_fetch_and_notify(app_handle: AppHandle) {
-    log::info!("[EUV] initial fetch started");
+    euv_log!("[EUV] initial fetch started");
     let cache_root: PathBuf = match get_cache_root(&app_handle) {
         Ok(directory) => directory,
         Err(_) => return,
@@ -246,14 +272,15 @@ pub(crate) async fn initial_fetch_and_notify(app_handle: AppHandle) {
     loop {
         match fetch_full_snapshot(&cache_root).await {
             Ok(version) => {
-                log::info!("[EUV] initial fetch done: {}", version);
+                euv_log!("[EUV] initial fetch done: {}", version);
                 set_serving_version(&version);
-                log::info!("[EUV] serving version updated to: {}", version);
+                set_serving_source("fetched");
+                euv_log!("[EUV] serving version updated to: {}", version);
                 notify_reload(&app_handle);
                 return;
             }
             Err(error) => {
-                log::warn!("[EUV] initial fetch failed: {}, retrying", error);
+                euv_log!("[EUV] initial fetch failed: {}, retrying", error);
                 tokio::time::sleep(Duration::from_millis(RETRY_INTERVAL_MILLIS)).await;
             }
         }
@@ -261,7 +288,7 @@ pub(crate) async fn initial_fetch_and_notify(app_handle: AppHandle) {
 }
 
 pub(crate) async fn update_cache_async(app_handle: AppHandle) {
-    log::info!("[EUV] background update started");
+    euv_log!("[EUV] background update started");
     let cache_root: PathBuf = match get_cache_root(&app_handle) {
         Ok(directory) => directory,
         Err(_) => return,
@@ -269,12 +296,13 @@ pub(crate) async fn update_cache_async(app_handle: AppHandle) {
     create_dir_all(&cache_root).await.ok();
     match fetch_full_snapshot(&cache_root).await {
         Ok(version) => {
-            log::info!("[EUV] background update done: {}", version);
+            euv_log!("[EUV] background update done: {}", version);
             set_serving_version(&version);
-            log::info!("[EUV] serving version updated to: {}", version);
+            set_serving_source("fetched");
+            euv_log!("[EUV] serving version updated to: {}", version);
             notify_reload(&app_handle);
         }
-        Err(error) => log::warn!("[EUV] background update failed: {}", error),
+        Err(error) => euv_log!("[EUV] background update failed: {}", error),
     }
 }
 
@@ -311,11 +339,13 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str) {
             match fetch_url(&url).await {
                 Ok(data) => {
                     if let Err(error) = atomic_write(&local, &data).await {
-                        log::warn!("[EUV] write failed {}: {}", clean, error);
+                        euv_log!("[EUV] write failed {}: {}", clean, error);
+                    } else {
+                        euv_log!("[EUV] fetched: {}", clean);
                     }
                 }
                 Err(error) => {
-                    log::warn!("[EUV] fetch failed {}: {}", clean, error);
+                    euv_log!("[EUV] fetch failed {}: {}", clean, error);
                 }
             }
         }));
@@ -451,6 +481,95 @@ const RELOAD_LISTENER_SCRIPT: &str = r#"<script>
 })();
 </script>"#;
 
+#[cfg(debug_assertions)]
+const DEBUG_PANEL_SCRIPT: &str = r#"<script>
+(function(){
+  var expanded=false;
+  var bar=document.createElement('div');
+  bar.id='__euv_debug_bar';
+  bar.style.cssText='position:fixed;bottom:0;left:0;right:0;height:36px;background:#1a1a2e;color:#0f0;font:13px/36px monospace;padding:0 12px;z-index:2147483647;cursor:pointer;user-select:none;display:flex;align-items:center;box-shadow:0 -2px 8px rgba(0,0,0,0.5);';
+  bar.textContent='\u25B2 [DEBUG] source: {{SOURCE}} | tap to expand';
+
+  var panel=document.createElement('div');
+  panel.id='__euv_debug_panel';
+  panel.style.cssText='position:fixed;bottom:0;left:0;right:0;height:50vh;background:#0d0d1a;color:#0f0;font:12px monospace;z-index:2147483646;display:none;flex-direction:column;box-shadow:0 -4px 16px rgba(0,0,0,0.7);';
+
+  var header=document.createElement('div');
+  header.style.cssText='padding:8px 12px;background:#1a1a2e;border-bottom:1px solid #333;flex-shrink:0;display:flex;justify-content:space-between;align-items:center;';
+  header.innerHTML='<span style="color:#0f0;font-weight:bold;">EUV Debug Console</span><span id="__euv_close" style="color:#f55;cursor:pointer;font-size:18px;">\u2716</span>';
+
+  var info=document.createElement('div');
+  info.style.cssText='padding:6px 12px;background:#111;border-bottom:1px solid #222;flex-shrink:0;color:#aaa;font-size:11px;word-break:break-all;';
+  info.textContent='source: {{SOURCE}} | path: {{PATH}}';
+
+  var logArea=document.createElement('div');
+  logArea.id='__euv_debug_logs';
+  logArea.style.cssText='flex:1;overflow-y:auto;padding:8px 12px;';
+
+  panel.appendChild(header);
+  panel.appendChild(info);
+  panel.appendChild(logArea);
+
+  function toggle(){
+    expanded=!expanded;
+    if(expanded){
+      panel.style.display='flex';
+      bar.style.bottom='50vh';
+      bar.textContent='\u25BC [DEBUG] source: {{SOURCE}} | tap to collapse';
+    } else {
+      panel.style.display='none';
+      bar.style.bottom='0';
+      bar.textContent='\u25B2 [DEBUG] source: {{SOURCE}} | tap to expand';
+    }
+  }
+  bar.addEventListener('click',toggle);
+
+  function addLog(msg){
+    var line=document.createElement('div');
+    line.style.cssText='padding:2px 0;border-bottom:1px solid #1a1a2e;color:#0f0;word-break:break-all;';
+    var now=new Date();
+    var ts=now.getHours().toString().padStart(2,'0')+':'+now.getMinutes().toString().padStart(2,'0')+':'+now.getSeconds().toString().padStart(2,'0')+'.'+now.getMilliseconds().toString().padStart(3,'0');
+    line.textContent='['+ts+'] '+msg;
+    logArea.appendChild(line);
+    logArea.scrollTop=logArea.scrollHeight;
+  }
+
+  function initListener(){
+    if(window.__TAURI__&&window.__TAURI__.event){
+      window.__TAURI__.event.listen('euv://debug-log',function(e){
+        addLog(e.payload||'');
+      });
+      addLog('[panel] listener registered');
+      addLog('[panel] source: {{SOURCE}}');
+      addLog('[panel] path: {{PATH}}');
+    } else {
+      var t=setInterval(function(){
+        if(window.__TAURI__&&window.__TAURI__.event){
+          clearInterval(t);
+          window.__TAURI__.event.listen('euv://debug-log',function(e){
+            addLog(e.payload||'');
+          });
+          addLog('[panel] listener registered');
+          addLog('[panel] source: {{SOURCE}}');
+          addLog('[panel] path: {{PATH}}');
+        }
+      },100);
+      setTimeout(function(){clearInterval(t);},10000);
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded',function(){
+    document.body.appendChild(panel);
+    document.body.appendChild(bar);
+    document.getElementById('__euv_close').addEventListener('click',function(e){
+      e.stopPropagation();
+      toggle();
+    });
+    initListener();
+  });
+})();
+</script>"#;
+
 pub(crate) fn handle_euv_scheme(
     app_handle: &AppHandle,
     request: http::Request<Vec<u8>>,
@@ -496,6 +615,11 @@ pub(crate) fn handle_euv_scheme(
     } else {
         active_dir.join(&path_decoded)
     };
+    #[cfg(debug_assertions)]
+    {
+        let serve_path: String = file_path.to_string_lossy().into_owned();
+        euv_log!("[EUV] serving: {}", serve_path);
+    }
     match std::fs::read(&file_path) {
         Ok(data) => {
             let mime: &str = mime_for(&path_decoded);
@@ -512,12 +636,25 @@ pub(crate) fn handle_euv_scheme(
             }
             let body: Vec<u8> = if is_index {
                 let html: String = String::from_utf8_lossy(&data).into_owned();
+                #[allow(unused_mut)]
+                let mut extra_scripts: String = RELOAD_LISTENER_SCRIPT.to_string();
+                #[cfg(debug_assertions)]
+                {
+                    let source: String = get_serving_source();
+                    let dir_path: String = active_dir.to_string_lossy().into_owned();
+                    extra_scripts.push_str(&format!(
+                        "{}",
+                        DEBUG_PANEL_SCRIPT
+                            .replace("{{SOURCE}}", &source)
+                            .replace("{{PATH}}", &dir_path)
+                    ));
+                }
                 let injected: String = if let Some(pos) = html.find("</head>") {
-                    format!("{}{}{}", &html[..pos], RELOAD_LISTENER_SCRIPT, &html[pos..])
+                    format!("{}{}{}", &html[..pos], extra_scripts, &html[pos..])
                 } else if let Some(pos) = html.find("<body") {
-                    format!("{}{}{}", &html[..pos], RELOAD_LISTENER_SCRIPT, &html[pos..])
+                    format!("{}{}{}", &html[..pos], extra_scripts, &html[pos..])
                 } else {
-                    format!("{}{}", RELOAD_LISTENER_SCRIPT, html)
+                    format!("{}{}", extra_scripts, html)
                 };
                 injected.into_bytes()
             } else {
@@ -536,9 +673,19 @@ pub(crate) fn handle_euv_scheme(
 #[tauri::command]
 pub(crate) async fn load_cached_resource(app_handle: AppHandle) -> Result<CachedPage, String> {
     let from_cache: bool = load_cached_html(&app_handle).await.is_some();
+    let source: String = get_serving_source();
+    let cache_path: String = get_serving_version()
+        .and_then(|version: String| {
+            get_cache_root(&app_handle)
+                .ok()
+                .map(|root: PathBuf| root.join(version).to_string_lossy().into_owned())
+        })
+        .unwrap_or_default();
     Ok(CachedPage {
         from_cache,
         remote_url: REMOTE_URL.to_string(),
+        source,
+        cache_path,
     })
 }
 
@@ -552,7 +699,8 @@ pub(crate) fn ensure_serving_version_sync(app_handle: &AppHandle) {
     };
     if let Some(existing) = read_active_version_sync(&cache_root) {
         set_serving_version(&existing);
-        log::info!("[EUV] reusing existing active deployment: {existing}");
+        set_serving_source("fetched");
+        euv_log!("[EUV] reusing existing active deployment: {existing}");
         return;
     }
     if BUNDLED_FILES.is_empty() {
@@ -590,5 +738,6 @@ pub(crate) fn ensure_serving_version_sync(app_handle: &AppHandle) {
         std::fs::rename(&temporary, &pointer).ok();
     }
     set_serving_version(&version_name);
-    log::info!("[EUV] deployed {count} bundled files sync, serving: {version_name}");
+    set_serving_source("bundled");
+    euv_log!("[EUV] deployed {count} bundled files sync, serving: {version_name}");
 }
