@@ -42,11 +42,14 @@ async fn switch_active_version(cache_root: &std::path::Path, version_name: &str)
 }
 
 async fn cleanup_old_versions(cache_root: &std::path::Path, current: &str) {
+    let serving = get_serving_version();
     let mut rd = match tokio::fs::read_dir(cache_root).await { Ok(r) => r, Err(_) => return };
     let mut versions: Vec<String> = Vec::new();
     while let Ok(Some(entry)) = rd.next_entry().await {
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with(VERSION_PREFIX) && name != current {
+            // Never remove the version currently being served by the scheme handler
+            if serving.as_deref() == Some(name.as_str()) { continue; }
             if let Ok(m) = entry.metadata().await { if m.is_dir() { versions.push(name); } }
         }
     }
@@ -240,14 +243,26 @@ pub(crate) fn handle_euv_scheme(
         Ok(d) => d,
         Err(_) => return http::Response::builder().status(500).body(Cow::Owned(b"Internal error".to_vec())).unwrap(),
     };
-    let pointer = active_pointer_path(&cache_root);
-    let version_name = match std::fs::read_to_string(&pointer) {
-        Ok(n) => n.trim().to_string(),
-        Err(_) => return http::Response::builder().status(503).body(Cow::Owned(b"Cache not ready".to_vec())).unwrap(),
+
+    // Wait for the serving version to be set by ensure_serving_version_sync().
+    // On Android, the WebView may start requesting resources before setup() completes,
+    // so we spin-wait briefly rather than returning an immediate 503.
+    let version_name = {
+        let mut version = get_serving_version();
+        if version.is_none() {
+            let start = std::time::Instant::now();
+            let timeout = std::time::Duration::from_secs(5);
+            while version.is_none() && start.elapsed() < timeout {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                version = get_serving_version();
+            }
+        }
+        match version {
+            Some(v) => v,
+            None => return http::Response::builder().status(503).body(Cow::Owned(b"Cache not ready".to_vec())).unwrap(),
+        }
     };
-    if version_name.is_empty() {
-        return http::Response::builder().status(503).body(Cow::Owned(b"Cache not ready".to_vec())).unwrap();
-    }
+
     let active_dir = cache_root.join(&version_name);
     let file_path = if path_decoded.is_empty() || path_decoded == "index.html" {
         active_dir.join("index.html")
