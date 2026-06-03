@@ -59,6 +59,19 @@ async fn get_active_cache_dir(cache_root: &Path) -> Option<PathBuf> {
     Some(cache_root.join(name))
 }
 
+fn read_active_version_sync(cache_root: &Path) -> Option<String> {
+    let name: String = std::fs::read_to_string(active_pointer_path(cache_root)).ok()?;
+    let name: String = name.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    if std::fs::metadata(cache_root.join(&name)).ok()?.is_dir() {
+        Some(name)
+    } else {
+        None
+    }
+}
+
 fn new_version_name() -> String {
     let timestamp: u128 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -234,6 +247,9 @@ pub(crate) async fn initial_fetch_and_notify(app_handle: AppHandle) {
         match fetch_full_snapshot(&cache_root).await {
             Ok(version) => {
                 log::info!("[EUV] initial fetch done: {}", version);
+                set_serving_version(&version);
+                log::info!("[EUV] serving version updated to: {}", version);
+                notify_reload(&app_handle);
                 return;
             }
             Err(error) => {
@@ -252,7 +268,12 @@ pub(crate) async fn update_cache_async(app_handle: AppHandle) {
     };
     create_dir_all(&cache_root).await.ok();
     match fetch_full_snapshot(&cache_root).await {
-        Ok(version) => log::info!("[EUV] background update done: {}", version),
+        Ok(version) => {
+            log::info!("[EUV] background update done: {}", version);
+            set_serving_version(&version);
+            log::info!("[EUV] serving version updated to: {}", version);
+            notify_reload(&app_handle);
+        }
         Err(error) => log::warn!("[EUV] background update failed: {}", error),
     }
 }
@@ -263,7 +284,15 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str) {
     extract_attr_values(html, "link", "href", &mut paths);
     extract_attr_values(html, "img", "src", &mut paths);
     extract_module_imports(html, &mut paths);
+    for cr in CRITICAL_RESOURCES {
+        let cr_string: String = cr.to_string();
+        if !paths.contains(&cr_string) {
+            paths.push(cr_string);
+        }
+    }
     let base_url: &str = REMOTE_BASE_URL.trim_end_matches('/');
+
+    let mut handles: Vec<tauri::async_runtime::JoinHandle<()>> = Vec::new();
     for relative_path in paths {
         if relative_path.starts_with("data:")
             || relative_path.starts_with("http://")
@@ -272,21 +301,27 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str) {
         {
             continue;
         }
-        let clean: &str = relative_path
+        let clean: String = relative_path
             .trim_start_matches('/')
-            .trim_start_matches("./");
+            .trim_start_matches("./")
+            .to_string();
         let url: String = format!("{}/{}", base_url, clean);
-        let local: PathBuf = version_dir.join(clean);
-        match fetch_url(&url).await {
-            Ok(data) => {
-                if let Err(error) = atomic_write(&local, &data).await {
-                    log::warn!("[EUV] write failed {}: {}", clean, error);
+        let local: PathBuf = version_dir.join(&clean);
+        handles.push(tauri::async_runtime::spawn(async move {
+            match fetch_url(&url).await {
+                Ok(data) => {
+                    if let Err(error) = atomic_write(&local, &data).await {
+                        log::warn!("[EUV] write failed {}: {}", clean, error);
+                    }
+                }
+                Err(error) => {
+                    log::warn!("[EUV] fetch failed {}: {}", clean, error);
                 }
             }
-            Err(error) => {
-                log::warn!("[EUV] fetch failed {}: {}", clean, error);
-            }
-        }
+        }));
+    }
+    for handle in handles {
+        handle.await.ok();
     }
 }
 
@@ -348,6 +383,15 @@ fn extract_quoted_value(input: &str) -> &str {
     ""
 }
 
+pub(crate) fn notify_reload(app_handle: &AppHandle) {
+    use tauri::Emitter;
+    if let Err(error) = app_handle.emit("euv://reload", ()) {
+        log::warn!("[EUV] failed to emit reload event: {}", error);
+    } else {
+        log::info!("[EUV] reload event emitted");
+    }
+}
+
 pub(crate) fn mime_for(path: &str) -> &'static str {
     let lower_path: String = path.to_lowercase();
     if lower_path.ends_with(".html") || lower_path.ends_with(".htm") {
@@ -385,6 +429,28 @@ pub(crate) fn mime_for(path: &str) -> &'static str {
     }
 }
 
+const RELOAD_LISTENER_SCRIPT: &str = r#"<script>
+(function(){
+  if(window.__TAURI__&&window.__TAURI__.event){
+    window.__TAURI__.event.listen('euv://reload',function(){
+      window.location.reload();
+    });
+  } else {
+    document.addEventListener('DOMContentLoaded',function(){
+      var t=setInterval(function(){
+        if(window.__TAURI__&&window.__TAURI__.event){
+          clearInterval(t);
+          window.__TAURI__.event.listen('euv://reload',function(){
+            window.location.reload();
+          });
+        }
+      },100);
+      setTimeout(function(){clearInterval(t);},10000);
+    });
+  }
+})();
+</script>"#;
+
 pub(crate) fn handle_euv_scheme(
     app_handle: &AppHandle,
     request: http::Request<Vec<u8>>,
@@ -407,9 +473,9 @@ pub(crate) fn handle_euv_scheme(
         let mut version: Option<String> = get_serving_version();
         if version.is_none() {
             let start: Instant = Instant::now();
-            let timeout: Duration = Duration::from_secs(5);
+            let timeout: Duration = Duration::from_secs(2);
             while version.is_none() && start.elapsed() < timeout {
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(Duration::from_millis(2));
                 version = get_serving_version();
             }
         }
@@ -424,7 +490,8 @@ pub(crate) fn handle_euv_scheme(
         }
     };
     let active_dir: PathBuf = cache_root.join(&version_name);
-    let file_path: PathBuf = if path_decoded.is_empty() || path_decoded == "index.html" {
+    let is_index: bool = path_decoded.is_empty() || path_decoded == "index.html";
+    let file_path: PathBuf = if is_index {
         active_dir.join("index.html")
     } else {
         active_dir.join(&path_decoded)
@@ -435,14 +502,28 @@ pub(crate) fn handle_euv_scheme(
             let mut builder: http::response::Builder = http::Response::builder()
                 .status(200)
                 .header("Content-Type", mime)
-                .header("Cache-Control", "no-cache")
+                .header("Cache-Control", "no-store, no-cache, must-revalidate")
+                .header("Pragma", "no-cache")
                 .header("Access-Control-Allow-Origin", "*");
             if path_decoded.ends_with(".wasm") {
                 builder = builder
                     .header("Cross-Origin-Embedder-Policy", "require-corp")
                     .header("Cross-Origin-Opener-Policy", "same-origin");
             }
-            builder.body(Cow::Owned(data)).unwrap()
+            let body: Vec<u8> = if is_index {
+                let html: String = String::from_utf8_lossy(&data).into_owned();
+                let injected: String = if let Some(pos) = html.find("</head>") {
+                    format!("{}{}{}", &html[..pos], RELOAD_LISTENER_SCRIPT, &html[pos..])
+                } else if let Some(pos) = html.find("<body") {
+                    format!("{}{}{}", &html[..pos], RELOAD_LISTENER_SCRIPT, &html[pos..])
+                } else {
+                    format!("{}{}", RELOAD_LISTENER_SCRIPT, html)
+                };
+                injected.into_bytes()
+            } else {
+                data
+            };
+            builder.body(Cow::Owned(body)).unwrap()
         }
         Err(_) => http::Response::builder()
             .status(404)
@@ -465,13 +546,18 @@ pub(crate) fn ensure_serving_version_sync(app_handle: &AppHandle) {
     if get_serving_version().is_some() {
         return;
     }
-    if BUNDLED_FILES.is_empty() {
-        return;
-    }
     let cache_root: PathBuf = match get_cache_root(app_handle) {
         Ok(directory) => directory,
         Err(_) => return,
     };
+    if let Some(existing) = read_active_version_sync(&cache_root) {
+        set_serving_version(&existing);
+        log::info!("[EUV] reusing existing active deployment: {existing}");
+        return;
+    }
+    if BUNDLED_FILES.is_empty() {
+        return;
+    }
     std::fs::create_dir_all(&cache_root).ok();
     let version_name: String = format!(
         "{}{}",
@@ -497,6 +583,11 @@ pub(crate) fn ensure_serving_version_sync(app_handle: &AppHandle) {
     }
     if count == 0 {
         return;
+    }
+    let pointer: PathBuf = cache_root.join(ACTIVE_LINK);
+    let temporary: PathBuf = cache_root.join(format!(".active_tmp_{}", std::process::id()));
+    if std::fs::write(&temporary, &version_name).is_ok() {
+        std::fs::rename(&temporary, &pointer).ok();
     }
     set_serving_version(&version_name);
     log::info!("[EUV] deployed {count} bundled files sync, serving: {version_name}");

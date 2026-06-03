@@ -1,36 +1,24 @@
 #!/usr/bin/env bash
-#
-# EUV Android Build Script
-# Usage:
-#   ./build.sh                    Build Android release package (default)
-#   ./build.sh android            Build Android release package
-#   ./build.sh android debug      Build Android debug package
-#   ./build.sh release            Build Android release package
-#   ./build.sh debug              Build Android debug package
-#
 
 set -euo pipefail
 
 PLATFORM="${1:-android}"
 MODE="${2:-release}"
 
-# Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 step()  { echo -e "${BLUE}[STEP]${NC} $*"; }
 
-# Switch to project root
 cd "$(dirname "$0")"
 PROJECT_ROOT="$(pwd)"
 
-# Read config
 CONFIG_FILE="app.config.json"
 if [ ! -f "$CONFIG_FILE" ]; then
     error "Config file not found: $CONFIG_FILE"
@@ -42,7 +30,6 @@ APP_ID=$(node -e "console.log(require('./$CONFIG_FILE').app.identifier)")
 
 info "App: $APP_NAME v$APP_VERSION ($APP_ID)"
 
-# Validate parameters
 case "$PLATFORM" in
     android)
         ;;
@@ -74,25 +61,19 @@ case "$MODE" in
         ;;
 esac
 
-# Check dependencies
 command -v cargo >/dev/null 2>&1 || error "cargo not found, please install Rust toolchain"
 
-# Use Node.js 20+
 if [ -f "$HOME/.nvm/nvm.sh" ]; then
     source "$HOME/.nvm/nvm.sh"
     nvm use 20 --silent 2>/dev/null || nvm use node --silent
 fi
 command -v npx >/dev/null 2>&1 || error "npx not found, please install Node.js"
 
-# Step 1: Apply config
 step "Applying config to platform files..."
 node scripts/apply-config.js
 
-# ===== Build =====
-
 info "Starting Android $MODE build..."
 
-# Detect OS
 case "$(uname -s)" in
     Darwin*)  HOST_OS="mac" ;;
     Linux*)   HOST_OS="linux" ;;
@@ -100,7 +81,6 @@ case "$(uname -s)" in
     *)        HOST_OS="unknown" ;;
 esac
 
-# Java — use project-local sdk/jdk, auto-download if missing
 export JAVA_HOME="$PROJECT_ROOT/sdk/jdk"
 if [ ! -x "$JAVA_HOME/bin/java" ] && [ ! -x "$JAVA_HOME/bin/java.exe" ]; then
     info "JDK not found in sdk/jdk/, auto-downloading..."
@@ -113,7 +93,6 @@ info "Using JDK: sdk/jdk/"
 export PATH="$JAVA_HOME/bin:$PATH"
 JAVA_HOME_WIN=$(cygpath -w "$JAVA_HOME" 2>/dev/null || echo "$JAVA_HOME")
 
-# Android SDK — use project-local sdk/android, auto-download if missing
 export ANDROID_HOME="$PROJECT_ROOT/sdk/android"
 if [ ! -d "$ANDROID_HOME/platforms" ]; then
     info "Android SDK not found in sdk/android/, auto-downloading..."
@@ -124,7 +103,6 @@ if [ ! -d "$ANDROID_HOME/platforms" ]; then
 fi
 info "Using Android SDK: sdk/android/"
 
-# Android NDK — auto-detect latest version
 if [ -z "${NDK_HOME:-}" ] && [ -d "$ANDROID_HOME/ndk" ]; then
     NDK_VER=$(ls "$ANDROID_HOME/ndk" 2>/dev/null | sort -V | tail -1)
     if [ -n "$NDK_VER" ]; then
@@ -132,7 +110,7 @@ if [ -z "${NDK_HOME:-}" ] && [ -d "$ANDROID_HOME/ndk" ]; then
     fi
 fi
 [ -n "${NDK_HOME:-}" ] || error "Android NDK not found, install via sdkmanager"
-# Write local.properties with resolved paths for Gradle
+
 ANDROID_HOME_WIN=$(cygpath -w "$ANDROID_HOME" 2>/dev/null || echo "$ANDROID_HOME")
 echo "sdk.dir=${ANDROID_HOME_WIN//\\/\\\\}" > src-tauri/gen/android/local.properties
 info "JAVA_HOME: $JAVA_HOME"
@@ -143,24 +121,22 @@ info "Node: $(node --version), Java: $(java -version 2>&1 | head -1)"
 
 BUILD_START=$(date +%s)
 
-# Backup custom RustWebViewClient.kt (tauri CLI overwrites generated/ directory)
 GENERATED_DIR="src-tauri/gen/android/app/src/main/java/com/euv/generated"
 BACKUP_FILE="/tmp/euv_RustWebViewClient_backup.kt"
+BACKUP_FILE_WV="/tmp/euv_RustWebView_backup.kt"
 cp "$GENERATED_DIR/RustWebViewClient.kt" "$BACKUP_FILE"
+cp "$GENERATED_DIR/RustWebView.kt" "$BACKUP_FILE_WV"
 
-# Run tauri CLI to compile Rust + generate Kotlin files (Gradle build will fail, ignore)
 if [ "$MODE" = "release" ]; then
     npx @tauri-apps/cli android build --apk 2>&1 || true
 else
     npx @tauri-apps/cli android build --apk --debug 2>&1 || true
 fi
 
-# Restore custom RustWebViewClient.kt
 cp "$BACKUP_FILE" "$GENERATED_DIR/RustWebViewClient.kt"
-info "Restored custom RustWebViewClient.kt"
+cp "$BACKUP_FILE_WV" "$GENERATED_DIR/RustWebView.kt"
+info "Restored custom RustWebViewClient.kt and RustWebView.kt"
 
-# Copy .so files to jniLibs for all architectures
-# Kotlin Rust.kt calls System.loadLibrary("euv_lib") which expects libeuv_lib.so
 LIB_NAME="libeuv_lib.so"
 JNI_BASE_DIR="src-tauri/gen/android/app/src/main/jniLibs"
 declare -A ARCH_MAP=(
@@ -183,7 +159,6 @@ for ARCH in "${!ARCH_MAP[@]}"; do
     fi
 done
 
-# Run Gradle build
 info "Running Gradle build..."
 ANDROID_DIR="src-tauri/gen/android"
 if [ "$MODE" = "release" ]; then
@@ -195,7 +170,6 @@ fi
 BUILD_END=$(date +%s)
 BUILD_DURATION=$((BUILD_END - BUILD_START))
 
-# Locate output
 APK_DIR="src-tauri/gen/android/app/build/outputs/apk"
 app_lower=$(printf '%s' "$APP_NAME" | tr '[:upper:]' '[:lower:]')
 if [ "$MODE" = "release" ]; then
@@ -213,7 +187,6 @@ if [ -f "$APK_PATH" ]; then
     info "Output: ./$OUTPUT_NAME"
     info "Size: $APK_SIZE"
 
-    # Auto-install to connected device
     if command -v adb >/dev/null 2>&1; then
         DEVICE_COUNT=$(adb devices | grep -c -w 'device' || true)
         if [ "$DEVICE_COUNT" -gt 0 ]; then

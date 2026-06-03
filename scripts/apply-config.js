@@ -126,17 +126,46 @@ function getIndexHtml(config) {
             : 'euv://localhost/' + path;
         }
 
+        // Fast adaptive polling: start at a very short interval so the very common
+        // case (bundled cache deployed synchronously during Rust setup) navigates
+        // almost immediately, then back off gradually for the rare offline-fetch path.
+        var attempts = 0;
+        var navigated = false;
+
+        function nextDelay() {
+          // 16ms for the first ~10 tries (~1 frame), then ramp toward 500ms cap.
+          if (attempts < 10) return 16;
+          if (attempts < 20) return 100;
+          return 500;
+        }
+
+        function navigate() {
+          if (navigated) return;
+          navigated = true;
+          window.location.replace(getSchemeUrl('index.html'));
+        }
+
         function pollForCache() {
-          window.__TAURI_INTERNALS__.invoke('load_cached_resource')
+          if (navigated) return;
+          var internals = window.__TAURI_INTERNALS__;
+          if (!internals || !internals.invoke) {
+            // Tauri bridge not injected yet; retry on the next frame.
+            attempts++;
+            setTimeout(pollForCache, nextDelay());
+            return;
+          }
+          internals.invoke('load_cached_resource')
             .then(function(result) {
               if (result && result.from_cache) {
-                window.location.replace(getSchemeUrl('index.html'));
+                navigate();
               } else {
-                setTimeout(pollForCache, 500);
+                attempts++;
+                setTimeout(pollForCache, nextDelay());
               }
             })
             .catch(function() {
-              setTimeout(pollForCache, 1000);
+              attempts++;
+              setTimeout(pollForCache, nextDelay());
             });
         }
 

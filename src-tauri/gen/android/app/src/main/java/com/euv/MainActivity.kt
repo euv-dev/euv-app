@@ -312,15 +312,19 @@ class MainActivity : TauriActivity() {
                             removeSplash()
                             injectExternalLinkInterceptor(webView)
                         } else {
-                            handler.postDelayed(this, 100)
+                            // Tight poll once the app page is loaded so the splash
+                            // is dismissed within ~one frame of first render.
+                            handler.postDelayed(this, 32)
                         }
                     }
                 } else {
-                    handler.postDelayed(this, 200)
+                    handler.postDelayed(this, 50)
                 }
             }
         }
-        handler.postDelayed(pollRunnable, 300)
+        // Start polling almost immediately instead of waiting a fixed 300ms,
+        // which previously kept the splash on screen well past first render.
+        handler.post(pollRunnable)
 
         Log.d("EUV_CACHE", "WebView setup done at ${System.currentTimeMillis()}")
     }
