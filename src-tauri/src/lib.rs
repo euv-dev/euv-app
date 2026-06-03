@@ -51,9 +51,13 @@ pub fn run() {
             });
             Ok(())
         })
-        .register_uri_scheme_protocol(SCHEME_NAME, move |ctx, req| {
-            handle_euv_scheme(ctx.app_handle(), req)
-        })
+        .register_uri_scheme_protocol(
+            SCHEME_NAME,
+            move |context: tauri::UriSchemeContext<'_, tauri::Wry>,
+                  request: http::Request<Vec<u8>>| {
+                handle_euv_scheme(context.app_handle(), request)
+            },
+        )
         .invoke_handler(generate_handler![load_cached_resource])
         .build(generate_context!())
         .expect("fatal: app failed to start")
