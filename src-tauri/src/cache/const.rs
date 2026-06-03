@@ -1,4 +1,5 @@
 include!(concat!(env!("OUT_DIR"), "/config_generated.rs"));
+
 pub(crate) const ACTIVE_LINK: &str = "active";
 pub(crate) const VERSION_PREFIX: &str = "v_";
 pub(crate) const FETCH_TIMEOUT_SECS: u64 = 30;
