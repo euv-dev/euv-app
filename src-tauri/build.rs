@@ -34,11 +34,7 @@ fn main() {
     let max_redirects: u64 = config["cache"]["maxRedirects"].as_u64().unwrap();
     let critical_resources: Vec<&str> = config["remote"]["criticalResources"]
         .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<&str>>()
-        })
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<&str>>())
         .unwrap_or_default();
     let critical_resources_code: String = format!(
         "pub(crate) const CRITICAL_RESOURCES:&[&str]=&[{}];",

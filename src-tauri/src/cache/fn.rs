@@ -642,12 +642,12 @@ pub(crate) fn handle_euv_scheme(
                 {
                     let source: String = get_serving_source();
                     let dir_path: String = active_dir.to_string_lossy().into_owned();
-                    extra_scripts.push_str(&format!(
-                        "{}",
-                        DEBUG_PANEL_SCRIPT
+                    extra_scripts.push_str(
+                        &DEBUG_PANEL_SCRIPT
                             .replace("{{SOURCE}}", &source)
                             .replace("{{PATH}}", &dir_path)
-                    ));
+                            .to_string(),
+                    );
                 }
                 let injected: String = if let Some(pos) = html.find("</head>") {
                     format!("{}{}{}", &html[..pos], extra_scripts, &html[pos..])
