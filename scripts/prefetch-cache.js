@@ -28,7 +28,8 @@ function loadConfig() {
 }
 
 /**
- * Follow redirects and download a URL, returning the body as a Buffer.
+ * Follow redirects and download a URL, returning { finalUrl, body } where
+ * finalUrl is the URL after all redirects and body is a Buffer.
  */
 function downloadUrl(url, maxRedirects = 10) {
   return new Promise((resolve, reject) => {
@@ -68,7 +69,9 @@ function downloadUrl(url, maxRedirects = 10) {
         }
         const chunks = [];
         stream.on('data', (chunk) => chunks.push(chunk));
-        stream.on('end', () => resolve(Buffer.concat(chunks)));
+        stream.on('end', () =>
+          resolve({ finalUrl: url, body: Buffer.concat(chunks) }),
+        );
         stream.on('error', reject);
         res.on('error', reject);
       })
@@ -111,11 +114,52 @@ function extractResourcePaths(html) {
   return [...new Set(paths)];
 }
 
+/**
+ * Derive the base URL for resolving relative resource paths.
+ * If the URL ends with '/', it's a directory — use it (minus trailing slash).
+ * Otherwise, strip the last path segment.
+ * e.g. "https://ltpp.vip/github/pages/euv-dev/euv/" -> "https://ltpp.vip/github/pages/euv-dev/euv"
+ *      "https://ltpp.vip/euv" -> "https://ltpp.vip"
+ */
+function deriveBaseUrl(finalUrl) {
+  const trimmed = finalUrl.replace(/\/$/, '');
+  if (finalUrl.endsWith('/')) {
+    return trimmed;
+  }
+  const lastSlash = trimmed.lastIndexOf('/');
+  const schemeEnd = trimmed.indexOf('://');
+  if (lastSlash > schemeEnd + 2) {
+    return trimmed.slice(0, lastSlash);
+  }
+  return trimmed;
+}
+
+/**
+ * Extract .wasm references from JS content.
+ * Handles: new URL('euv_bg.wasm', import.meta.url)
+ */
+function extractWasmReferences(jsContent, jsRelPath) {
+  const jsDir = path.dirname(jsRelPath);
+  const results = [];
+  const pattern = /['"]([^'"]*\.wasm)['"]/g;
+  let match;
+  while ((match = pattern.exec(jsContent)) !== null) {
+    const wasmFile = match[1];
+    if (!wasmFile.includes('://') && !wasmFile.includes(' ')) {
+      const resolved =
+        jsDir === '.' ? wasmFile : `${jsDir}/${wasmFile}`;
+      if (!results.includes(resolved)) {
+        results.push(resolved);
+      }
+    }
+  }
+  return results;
+}
+
 async function main() {
   console.log('[prefetch-cache] Starting resource prefetch...');
   const config = loadConfig();
   const remoteUrl = config.remote.url;
-  const baseUrl = config.remote.baseUrl.replace(/\/$/, '');
 
   // Clean and recreate bundled cache directory
   if (fs.existsSync(BUNDLED_CACHE_DIR)) {
@@ -123,28 +167,23 @@ async function main() {
   }
   fs.mkdirSync(BUNDLED_CACHE_DIR, { recursive: true });
 
-  // Step 1: Download index.html
+  // Step 1: Download index.html (following redirects, use final URL as base)
   console.log(`[prefetch-cache] Downloading HTML: ${remoteUrl}`);
-  const htmlBuffer = await downloadUrl(remoteUrl);
+  const { finalUrl, body: htmlBuffer } = await downloadUrl(remoteUrl);
   const html = htmlBuffer.toString('utf-8');
   fs.writeFileSync(path.join(BUNDLED_CACHE_DIR, 'index.html'), html);
-  console.log('[prefetch-cache] Saved index.html');
+  console.log(`[prefetch-cache] Final URL after redirects: ${finalUrl}`);
+  const baseUrl = deriveBaseUrl(finalUrl);
+  console.log(`[prefetch-cache] Base URL for resources: ${baseUrl}`);
 
-  // Step 2: Extract and download linked resources
+  // Step 2: Extract and download linked resources from HTML
   const resourcePaths = extractResourcePaths(html);
-
-  // Also add critical resources from config
-  if (config.remote.criticalResources) {
-    for (const cr of config.remote.criticalResources) {
-      if (!resourcePaths.includes(cr)) {
-        resourcePaths.push(cr);
-      }
-    }
-  }
 
   console.log(
     `[prefetch-cache] Found ${resourcePaths.length} resources to download`,
   );
+
+  const downloadedFiles = []; // { cleanPath, data }
 
   for (const relPath of resourcePaths) {
     const cleanPath = relPath.replace(/^\.\//, '');
@@ -155,11 +194,16 @@ async function main() {
 
     try {
       console.log(`[prefetch-cache]   Fetching: ${cleanPath}`);
-      const data = await downloadUrl(url);
+      const { body: data } = await downloadUrl(url);
+      if (data.length === 0) {
+        console.warn(`[prefetch-cache]   WARN: Empty response for ${cleanPath}, skipping`);
+        continue;
+      }
       fs.writeFileSync(localPath, data);
       console.log(
         `[prefetch-cache]   Saved: ${cleanPath} (${data.length} bytes)`,
       );
+      downloadedFiles.push({ cleanPath, data });
     } catch (err) {
       console.warn(
         `[prefetch-cache]   WARN: Failed to fetch ${cleanPath}: ${err.message}`,
@@ -167,7 +211,49 @@ async function main() {
     }
   }
 
-  // Step 3: Generate a manifest for Rust to know what's bundled
+  // Step 3: Scan downloaded JS for additional dependencies (e.g. .wasm)
+  const extraPaths = [];
+  for (const { cleanPath, data } of downloadedFiles) {
+    if (cleanPath.endsWith('.js') || cleanPath.endsWith('.mjs')) {
+      const jsContent = data.toString('utf-8');
+      const wasmRefs = extractWasmReferences(jsContent, cleanPath);
+      for (const ref of wasmRefs) {
+        if (!resourcePaths.includes(ref) && !extraPaths.includes(ref)) {
+          extraPaths.push(ref);
+        }
+      }
+    }
+  }
+
+  if (extraPaths.length > 0) {
+    console.log(`[prefetch-cache] Found ${extraPaths.length} extra dependencies in JS`);
+    for (const relPath of extraPaths) {
+      const cleanPath = relPath.replace(/^\.\//, '');
+      const url = `${baseUrl}/${cleanPath}`;
+      const localPath = path.join(BUNDLED_CACHE_DIR, cleanPath);
+
+      fs.mkdirSync(path.dirname(localPath), { recursive: true });
+
+      try {
+        console.log(`[prefetch-cache]   Fetching: ${cleanPath}`);
+        const { body: data } = await downloadUrl(url);
+        if (data.length === 0) {
+          console.warn(`[prefetch-cache]   WARN: Empty response for ${cleanPath}, skipping`);
+          continue;
+        }
+        fs.writeFileSync(localPath, data);
+        console.log(
+          `[prefetch-cache]   Saved: ${cleanPath} (${data.length} bytes)`,
+        );
+      } catch (err) {
+        console.warn(
+          `[prefetch-cache]   WARN: Failed to fetch ${cleanPath}: ${err.message}`,
+        );
+      }
+    }
+  }
+
+  // Step 4: Generate a manifest for Rust to know what's bundled
   const manifest = {
     version: config.app.version,
     timestamp: new Date().toISOString(),

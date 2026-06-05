@@ -8,9 +8,7 @@
     "author": "you"
   },
   "remote": {
-    "url": "https://ltpp.vip/euv",
-    "baseUrl": "https://ltpp.vip/static/euv/",
-    "criticalResources": ["pkg/euv.js", "pkg/euv_bg.wasm"]
+    "url": "https://ltpp.vip/euv"
   },
   "cache": {
     "directory": "euv_web_cache",
@@ -22,7 +20,7 @@
     "loadingSpinnerTrackColor": "#e0e0e0",
     "splashFadeDurationMs": 300,
     "splashMaxWaitMs": 5000,
-    "immersiveMode": true,
+    "immersiveMode": false,
     "antiAliasing": true,
     "maxFrameRateEnabled": true,
     "loadingHtml": "",

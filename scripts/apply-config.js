@@ -221,9 +221,6 @@ function writeAndroidConfig(config) {
     'euv',
     'AppConfig.kt',
   );
-  const criticalResources = config.remote.criticalResources
-    .map((r) => `        "${r}"`)
-    .join(',\n');
 
   // Generate loading HTML for Android (escaped for Kotlin raw string)
   const loadingHtml = getLoadingHtml(config);
@@ -238,10 +235,6 @@ function writeAndroidConfig(config) {
 
 object AppConfig {
     const val REMOTE_URL = "${config.remote.url}"
-    const val REMOTE_BASE_URL = "${config.remote.baseUrl}"
-    val CRITICAL_SUBRESOURCES = listOf(
-${criticalResources}
-    )
 
     const val CACHE_DIR = "${config.cache.directory}"
     const val MAX_REDIRECTS = ${config.cache.maxRedirects}

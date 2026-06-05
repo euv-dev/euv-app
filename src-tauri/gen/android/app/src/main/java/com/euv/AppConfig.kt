@@ -2,11 +2,6 @@ package com.euv
 
 object AppConfig {
     const val REMOTE_URL = "https://ltpp.vip/euv"
-    const val REMOTE_BASE_URL = "https://ltpp.vip/static/euv/"
-    val CRITICAL_SUBRESOURCES = listOf(
-        "pkg/euv.js",
-        "pkg/euv_bg.wasm"
-    )
 
     const val CACHE_DIR = "euv_web_cache"
     const val MAX_REDIRECTS = 10
@@ -14,7 +9,7 @@ object AppConfig {
     const val BACKGROUND_COLOR = "#FFFFFF"
     const val SPLASH_FADE_DURATION_MS = 300L
     const val SPLASH_MAX_WAIT_MS = 5000L
-    const val IMMERSIVE_MODE = true
+    const val IMMERSIVE_MODE = false
     const val ANTI_ALIASING = true
     const val MAX_FRAME_RATE_ENABLED = true
 

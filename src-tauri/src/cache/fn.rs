@@ -150,12 +150,16 @@ async fn cleanup_old_versions(cache_root: &Path, current: &str) {
     }
 }
 
-pub(crate) async fn fetch_url(url: &str) -> Result<Vec<u8>, CacheError> {
-    let client: Client = Client::builder()
+fn build_client() -> Result<Client, CacheError> {
+    Client::builder()
         .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
         .redirect(Policy::limited(MAX_REDIRECTS))
         .build()
-        .map_err(|error: reqwest::Error| CacheError::Fetch(error.to_string()))?;
+        .map_err(|error: reqwest::Error| CacheError::Fetch(error.to_string()))
+}
+
+pub(crate) async fn fetch_url(url: &str) -> Result<Vec<u8>, CacheError> {
+    let client: Client = build_client()?;
     let response: reqwest::Response = client
         .get(url)
         .send()
@@ -176,6 +180,32 @@ pub(crate) async fn fetch_url(url: &str) -> Result<Vec<u8>, CacheError> {
         )));
     }
     Ok(bytes)
+}
+
+/// Fetch a URL and return (final_url_after_redirects, body_bytes).
+async fn fetch_url_with_final_url(url: &str) -> Result<(String, Vec<u8>), CacheError> {
+    let client: Client = build_client()?;
+    let response: reqwest::Response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error: reqwest::Error| CacheError::Fetch(error.to_string()))?;
+    if !response.status().is_success() {
+        return Err(CacheError::Fetch(format!("HTTP {}", response.status())));
+    }
+    let final_url: String = response.url().to_string();
+    let bytes: Vec<u8> = response
+        .bytes()
+        .await
+        .map_err(|error: reqwest::Error| CacheError::Fetch(error.to_string()))?
+        .to_vec();
+    if bytes.len() > MAX_BODY_SIZE {
+        return Err(CacheError::Fetch(format!(
+            "Too large: {} bytes",
+            bytes.len()
+        )));
+    }
+    Ok((final_url, bytes))
 }
 
 async fn atomic_write(target: &Path, data: &[u8]) -> Result<(), CacheError> {
@@ -245,18 +275,114 @@ pub(crate) async fn deploy_bundled_cache(app_handle: &AppHandle) -> bool {
 }
 
 async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
-    let html_bytes: Vec<u8> = fetch_url(REMOTE_URL).await?;
+    let (final_url, html_bytes) = fetch_url_with_final_url(REMOTE_URL).await?;
     let html: String = String::from_utf8_lossy(&html_bytes).to_string();
     if html.is_empty() {
         return Err(CacheError::Fetch("empty HTML".to_string()));
     }
+    euv_log!("[EUV] final URL after redirects: {}", final_url);
     let version_name: String = new_version_name();
     let version_dir: PathBuf = cache_root.join(&version_name);
     create_dir_all(&version_dir)
         .await
         .map_err(|error: std::io::Error| CacheError::Write(error.to_string()))?;
     atomic_write(&version_dir.join("index.html"), html.as_bytes()).await?;
-    fetch_linked_resources(&version_dir, &html).await;
+    let resource_count: usize = fetch_linked_resources(&version_dir, &html, &final_url).await;
+
+    // Verify completeness: HTML must reference at least one resource, and we must have fetched them all
+    let mut expected_paths: Vec<String> = Vec::new();
+    extract_attr_values(&html, "script", "src", &mut expected_paths);
+    extract_attr_values(&html, "link", "href", &mut expected_paths);
+    extract_attr_values(&html, "img", "src", &mut expected_paths);
+    extract_module_imports(&html, &mut expected_paths);
+    // Filter out absolute URLs
+    expected_paths.retain(|p| {
+        !p.starts_with("http://")
+            && !p.starts_with("https://")
+            && !p.starts_with("//")
+            && !p.starts_with("data:")
+    });
+
+    if resource_count == 0 && !expected_paths.is_empty() {
+        // HTML references resources but none were fetched — incomplete snapshot
+        remove_dir_all(&version_dir).await.ok();
+        return Err(CacheError::Fetch(
+            "incomplete snapshot: no resources fetched".to_string(),
+        ));
+    }
+
+    // Verify critical files exist on disk (JS, CSS, images)
+    for expected in &expected_paths {
+        let clean: String = expected
+            .trim_start_matches('/')
+            .trim_start_matches("./")
+            .to_string();
+        let file_path: PathBuf = version_dir.join(&clean);
+        if !file_path.exists() {
+            euv_log!("[EUV] missing critical resource: {}", clean);
+            remove_dir_all(&version_dir).await.ok();
+            return Err(CacheError::Fetch(format!(
+                "incomplete snapshot: missing {}",
+                clean
+            )));
+        }
+    }
+
+    // Also verify any .wasm files discovered from JS are present.
+    // Scan ALL JS/MJS files in the version directory (not just those in expected_paths)
+    // because JS modules may be imported inline (e.g. `import ... from './pkg/euv.js'`)
+    let mut wasm_paths: Vec<String> = Vec::new();
+    // First, collect JS paths from expected_paths
+    let mut js_to_scan: Vec<String> = expected_paths
+        .iter()
+        .map(|p| {
+            p.trim_start_matches('/')
+                .trim_start_matches("./")
+                .to_string()
+        })
+        .filter(|c| c.ends_with(".js") || c.ends_with(".mjs"))
+        .collect();
+    // Also scan any JS files that were fetched (they may have been found via import statements)
+    let pkg_dir: PathBuf = version_dir.join("pkg");
+    if pkg_dir.exists() {
+        if let Ok(mut entries) = tokio::fs::read_dir(&pkg_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let name: String = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(".js") || name.ends_with(".mjs") {
+                    let rel: String = format!("pkg/{}", name);
+                    if !js_to_scan.contains(&rel) {
+                        js_to_scan.push(rel);
+                    }
+                }
+            }
+        }
+    }
+    for js_rel in &js_to_scan {
+        let js_path: PathBuf = version_dir.join(js_rel);
+        if let Ok(js_content) = read_to_string(&js_path).await {
+            extract_wasm_references(&js_content, js_rel, &mut wasm_paths);
+        }
+    }
+    for wasm_ref in &wasm_paths {
+        let clean: String = wasm_ref
+            .trim_start_matches('/')
+            .trim_start_matches("./")
+            .to_string();
+        let file_path: PathBuf = version_dir.join(&clean);
+        if !file_path.exists() {
+            euv_log!("[EUV] missing critical WASM resource: {}", clean);
+            remove_dir_all(&version_dir).await.ok();
+            return Err(CacheError::Fetch(format!(
+                "incomplete snapshot: missing WASM {}",
+                clean
+            )));
+        }
+    }
+
+    euv_log!(
+        "[EUV] snapshot complete: {} resources fetched, all critical files verified",
+        resource_count
+    );
     switch_active_version(cache_root, &version_name).await?;
     cleanup_old_versions(cache_root, &version_name).await;
     Ok(version_name)
@@ -294,33 +420,110 @@ pub(crate) async fn update_cache_async(app_handle: AppHandle) {
         Err(_) => return,
     };
     create_dir_all(&cache_root).await.ok();
+
+    // Read the current serving version's HTML to compare after update
+    let old_html: Option<String> = if let Some(old_version) = get_serving_version() {
+        read_to_string(cache_root.join(&old_version).join("index.html"))
+            .await
+            .ok()
+    } else {
+        None
+    };
+
     match fetch_full_snapshot(&cache_root).await {
         Ok(version) => {
             euv_log!("[EUV] background update done: {}", version);
             set_serving_version(&version);
             set_serving_source("fetched");
             euv_log!("[EUV] serving version updated to: {}", version);
-            notify_reload(&app_handle);
+
+            // Only reload if content actually changed
+            let new_html: Option<String> =
+                read_to_string(cache_root.join(&version).join("index.html"))
+                    .await
+                    .ok();
+            let content_changed: bool = match (&old_html, &new_html) {
+                (Some(old), Some(new)) => old != new,
+                _ => true,
+            };
+            if content_changed {
+                euv_log!("[EUV] content changed, reloading");
+                notify_reload(&app_handle);
+            } else {
+                euv_log!("[EUV] content unchanged, skipping reload");
+            }
         }
         Err(error) => euv_log!("[EUV] background update failed: {}", error),
     }
 }
 
-async fn fetch_linked_resources(version_dir: &Path, html: &str) {
+/// Derive the base URL for resolving relative resource paths.
+/// If the final URL ends with '/', it's already a directory URL — use it as-is (minus trailing slash).
+/// Otherwise, strip the last path segment (e.g. "https://x.com/a/b" -> "https://x.com/a").
+fn derive_base_url(final_url: &str) -> String {
+    let url: String = final_url.trim_end_matches('/').to_string();
+    // If the URL ended with '/', the trimmed version is the base.
+    if final_url.ends_with('/') {
+        return url;
+    }
+    // Otherwise, strip the last path component
+    if let Some(pos) = url.rfind('/') {
+        // Make sure we don't strip past the scheme (e.g. "https://")
+        if pos > url.find("://").map_or(0, |p| p + 2) {
+            return url[..pos].to_string();
+        }
+    }
+    url
+}
+
+/// Fetch all linked resources. Returns the total number of successfully fetched resources.
+async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str) -> usize {
     let mut paths: Vec<String> = Vec::new();
     extract_attr_values(html, "script", "src", &mut paths);
     extract_attr_values(html, "link", "href", &mut paths);
     extract_attr_values(html, "img", "src", &mut paths);
     extract_module_imports(html, &mut paths);
-    for cr in CRITICAL_RESOURCES {
-        let cr_string: String = cr.to_string();
-        if !paths.contains(&cr_string) {
-            paths.push(cr_string);
+    let base_url: String = derive_base_url(final_url);
+    euv_log!("[EUV] resource base URL: {}", base_url);
+
+    // Phase 1: fetch resources referenced in HTML
+    let fetched: Vec<(String, Vec<u8>)> = fetch_resource_list(&paths, &base_url, version_dir).await;
+    let mut total_count: usize = fetched.len();
+
+    // Phase 2: scan downloaded JS files for additional dependencies (e.g. .wasm)
+    let mut extra_paths: Vec<String> = Vec::new();
+    for (clean_path, data) in &fetched {
+        if clean_path.ends_with(".js") || clean_path.ends_with(".mjs") {
+            let js_content: String = String::from_utf8_lossy(data).to_string();
+            extract_wasm_references(&js_content, clean_path, &mut extra_paths);
+            extract_module_imports(&js_content, &mut extra_paths);
         }
     }
-    let base_url: &str = REMOTE_BASE_URL.trim_end_matches('/');
+    // Remove any already-fetched paths
+    extra_paths.retain(|p| {
+        let clean: String = p.trim_start_matches('/').trim_start_matches("./").to_string();
+        !fetched.iter().any(|(c, _)| c == &clean)
+    });
+    if !extra_paths.is_empty() {
+        euv_log!("[EUV] found {} extra dependencies in JS", extra_paths.len());
+        let extra_fetched: Vec<(String, Vec<u8>)> =
+            fetch_resource_list(&extra_paths, &base_url, version_dir).await;
+        total_count += extra_fetched.len();
+    }
+    total_count
+}
 
+async fn fetch_resource_list(
+    paths: &[String],
+    base_url: &str,
+    version_dir: &Path,
+) -> Vec<(String, Vec<u8>)> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    let results: Arc<TokioMutex<Vec<(String, Vec<u8>)>>> = Arc::new(TokioMutex::new(Vec::new()));
     let mut handles: Vec<tauri::async_runtime::JoinHandle<()>> = Vec::new();
+
     for relative_path in paths {
         if relative_path.starts_with("data:")
             || relative_path.starts_with("http://")
@@ -335,13 +538,19 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str) {
             .to_string();
         let url: String = format!("{}/{}", base_url, clean);
         let local: PathBuf = version_dir.join(&clean);
+        let results_clone: Arc<TokioMutex<Vec<(String, Vec<u8>)>>> = results.clone();
         handles.push(tauri::async_runtime::spawn(async move {
             match fetch_url(&url).await {
                 Ok(data) => {
+                    if data.is_empty() {
+                        euv_log!("[EUV] skipped empty resource: {}", clean);
+                        return;
+                    }
                     if let Err(error) = atomic_write(&local, &data).await {
                         euv_log!("[EUV] write failed {}: {}", clean, error);
                     } else {
-                        euv_log!("[EUV] fetched: {}", clean);
+                        euv_log!("[EUV] fetched: {} ({} bytes)", clean, data.len());
+                        results_clone.lock().await.push((clean, data));
                     }
                 }
                 Err(error) => {
@@ -352,6 +561,58 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str) {
     }
     for handle in handles {
         handle.await.ok();
+    }
+    let mutex = Arc::try_unwrap(results).unwrap_or_else(|arc| {
+        // If there are still other references (shouldn't happen since we joined all),
+        // create a new mutex with the cloned data
+        TokioMutex::new(arc.blocking_lock().clone())
+    });
+    mutex.into_inner()
+}
+
+/// Extract .wasm file references from JS content.
+/// Handles patterns like: new URL('euv_bg.wasm', import.meta.url)
+/// and: fetch(new URL('file.wasm', ...))
+fn extract_wasm_references(js: &str, js_path: &str, results: &mut Vec<String>) {
+    // Determine the directory of the JS file for resolving relative paths
+    let js_dir: &str = if let Some(pos) = js_path.rfind('/') {
+        &js_path[..pos]
+    } else {
+        ""
+    };
+
+    let mut pos: usize = 0;
+    while pos < js.len() {
+        // Look for quoted strings ending in .wasm
+        let index: usize = match js[pos..].find(".wasm") {
+            Some(offset) => pos + offset,
+            None => break,
+        };
+        // Find the start of the quoted string containing this .wasm reference
+        let search_start: usize = if index > 60 { index - 60 } else { 0 };
+        let before: &str = &js[search_start..index];
+        let wasm_ref: Option<&str> = before
+            .rfind('\'')
+            .map(|q| &js[search_start + q + 1..index + 5])
+            .or_else(|| {
+                before
+                    .rfind('"')
+                    .map(|q| &js[search_start + q + 1..index + 5])
+            });
+        if let Some(wasm_file) = wasm_ref {
+            // Only accept simple relative filenames (no absolute URLs)
+            if !wasm_file.contains("://") && !wasm_file.contains(' ') {
+                let resolved: String = if js_dir.is_empty() {
+                    wasm_file.to_string()
+                } else {
+                    format!("{}/{}", js_dir, wasm_file)
+                };
+                if !results.contains(&resolved) {
+                    results.push(resolved);
+                }
+            }
+        }
+        pos = index + 5;
     }
 }
 
