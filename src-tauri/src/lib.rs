@@ -7,22 +7,21 @@ mod cache;
 
 use cache::*;
 
-use serde::Serialize;
+use std::{
+    borrow::Cow,
+    path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use {
     reqwest::{Client, redirect::Policy},
-    std::{
-        borrow::Cow,
-        path::{Path, PathBuf},
-        sync::{Mutex, OnceLock},
-        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-    },
+    serde::Serialize,
     tauri::{
-        App, AppHandle, Builder, RunEvent, async_runtime::spawn, generate_context, generate_handler,
+        App, AppHandle, Builder, Manager, RunEvent, async_runtime::spawn, generate_context,
+        generate_handler,
     },
-    tokio::fs::{
-        create_dir_all, metadata, read_dir, read_to_string, remove_dir_all, rename, write,
-    },
+    tokio::fs::{create_dir_all, read_dir, read_to_string, remove_dir_all, rename, write},
 };
 
 pub fn run() {
@@ -40,18 +39,14 @@ pub fn run() {
             let handle: AppHandle = app.handle().clone();
             #[cfg(debug_assertions)]
             let _ = APP_HANDLE.set(handle.clone());
-            ensure_serving_version_sync(&handle);
+            deploy_bundled_cache_sync(&handle);
             spawn(async move {
-                if load_cached_html(&handle).await.is_none() {
-                    euv_log!("[EUV] no cache, deploying bundled");
-                    deploy_bundled_cache(&handle).await;
-                }
-                if load_cached_html(&handle).await.is_some() {
+                if has_active_cache(&handle) {
                     euv_log!("[EUV] cache ready, background update");
-                    update_cache_async(handle).await;
+                    background_update(handle).await;
                 } else {
                     euv_log!("[EUV] no cache, initial fetch");
-                    initial_fetch_and_notify(handle).await;
+                    initial_fetch(handle).await;
                 }
             });
             Ok(())
