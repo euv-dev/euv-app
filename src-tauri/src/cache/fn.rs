@@ -1,5 +1,62 @@
-use crate::*;
+use super::*;
 
+/// Initializes and runs the Tauri application with EUV cache scheme.
+///
+/// Sets up the custom URI scheme handler, deploys bundled cache,
+/// and starts the background update or initial fetch process.
+///
+/// # Panics
+///
+/// Panics if the Tauri application fails to build.
+pub fn run() {
+    #[cfg(target_os = "android")]
+    {
+        tauri::android_binding!(com, euv, run, tauri::wry);
+    }
+    Builder::default()
+        .setup(|app: &mut App| {
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .build(),
+            )?;
+            let handle: AppHandle = app.handle().clone();
+            #[cfg(debug_assertions)]
+            let _ = APP_HANDLE.set(handle.clone());
+            deploy_bundled_cache_sync(&handle);
+            spawn(async move {
+                if has_active_cache(&handle) {
+                    euv_log!("[EUV] cache ready, background update");
+                    background_update(handle).await;
+                } else {
+                    euv_log!("[EUV] no cache, initial fetch");
+                    initial_fetch(handle).await;
+                }
+            });
+            Ok(())
+        })
+        .register_uri_scheme_protocol(
+            SCHEME_NAME,
+            move |context: tauri::UriSchemeContext<'_, tauri::Wry>,
+                  request: http::Request<Vec<u8>>| {
+                handle_euv_scheme(context.app_handle(), request)
+            },
+        )
+        .invoke_handler(generate_handler![load_cached_resource])
+        .build(generate_context!())
+        .expect("fatal: app failed to start")
+        .run(|_: &AppHandle, _: RunEvent| {});
+}
+
+/// Resolves the application cache directory path.
+///
+/// # Arguments
+///
+/// - `&AppHandle`: The Tauri application handle used to resolve the cache directory.
+///
+/// # Returns
+///
+/// - `Result<PathBuf, CacheError>`: The cache root directory path, or an error if resolution fails.
 pub(crate) fn get_cache_root(app_handle: &AppHandle) -> Result<PathBuf, CacheError> {
     let mut cache_directory: PathBuf = app_handle
         .path()
@@ -9,10 +66,28 @@ pub(crate) fn get_cache_root(app_handle: &AppHandle) -> Result<PathBuf, CacheErr
     Ok(cache_directory)
 }
 
+/// Returns the path to the active version pointer file.
+///
+/// # Arguments
+///
+/// - `&Path`: The cache root directory path.
+///
+/// # Returns
+///
+/// - `PathBuf`: The path to the active pointer file.
 fn active_pointer_path(cache_root: &Path) -> PathBuf {
     cache_root.join(ACTIVE_LINK)
 }
 
+/// Reads the currently active version name from the pointer file synchronously.
+///
+/// # Arguments
+///
+/// - `&Path`: The cache root directory path.
+///
+/// # Returns
+///
+/// - `Option<String>`: The active version name if it exists and is valid, otherwise `None`.
 fn read_active_version_sync(cache_root: &Path) -> Option<String> {
     let name: String = std::fs::read_to_string(active_pointer_path(cache_root)).ok()?;
     let name: String = name.trim().to_string();
@@ -26,6 +101,11 @@ fn read_active_version_sync(cache_root: &Path) -> Option<String> {
     }
 }
 
+/// Generates a new version directory name using the current timestamp.
+///
+/// # Returns
+///
+/// - `String`: A version name in the format `v_<timestamp_millis>`.
 fn new_version_name() -> String {
     let timestamp: u128 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -34,6 +114,18 @@ fn new_version_name() -> String {
     format!("{VERSION_PREFIX}{timestamp}")
 }
 
+/// Switches the active version pointer to the specified version asynchronously.
+///
+/// Uses atomic rename to ensure the pointer file is updated safely.
+///
+/// # Arguments
+///
+/// - `&Path`: The cache root directory path.
+/// - `&str`: The version name to set as active.
+///
+/// # Returns
+///
+/// - `Result<(), CacheError>`: Ok if the switch succeeded, or a write error.
 async fn switch_active_version(cache_root: &Path, version_name: &str) -> Result<(), CacheError> {
     let pointer: PathBuf = active_pointer_path(cache_root);
     let temporary: PathBuf = cache_root.join(format!(".active_tmp_{}", std::process::id()));
@@ -47,6 +139,18 @@ async fn switch_active_version(cache_root: &Path, version_name: &str) -> Result<
     Ok(())
 }
 
+/// Switches the active version pointer to the specified version synchronously.
+///
+/// Uses atomic rename to ensure the pointer file is updated safely.
+///
+/// # Arguments
+///
+/// - `&Path`: The cache root directory path.
+/// - `&str`: The version name to set as active.
+///
+/// # Returns
+///
+/// - `Result<(), CacheError>`: Ok if the switch succeeded, or a write error.
 fn switch_active_version_sync(cache_root: &Path, version_name: &str) -> Result<(), CacheError> {
     let pointer: PathBuf = active_pointer_path(cache_root);
     let temporary: PathBuf = cache_root.join(format!(".active_tmp_{}", std::process::id()));
@@ -58,6 +162,12 @@ fn switch_active_version_sync(cache_root: &Path, version_name: &str) -> Result<(
     Ok(())
 }
 
+/// Removes old version directories, keeping only the most recent ones.
+///
+/// # Arguments
+///
+/// - `&Path`: The cache root directory path.
+/// - `&str`: The current active version name (will not be removed).
 async fn cleanup_old_versions(cache_root: &Path, current: &str) {
     let mut read_dir_result: tokio::fs::ReadDir = match read_dir(cache_root).await {
         Ok(entries) => entries,
@@ -86,6 +196,11 @@ async fn cleanup_old_versions(cache_root: &Path, current: &str) {
     }
 }
 
+/// Builds an HTTP client with configured timeout and redirect policy.
+///
+/// # Returns
+///
+/// - `Result<Client, CacheError>`: A configured reqwest client, or a fetch error.
 fn build_client() -> Result<Client, CacheError> {
     Client::builder()
         .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
@@ -94,6 +209,17 @@ fn build_client() -> Result<Client, CacheError> {
         .map_err(|error: reqwest::Error| CacheError::Fetch(error.to_string()))
 }
 
+/// Fetches a URL and returns the response body as bytes.
+///
+/// Enforces a maximum body size limit.
+///
+/// # Arguments
+///
+/// - `&str`: The URL to fetch.
+///
+/// # Returns
+///
+/// - `Result<Vec<u8>, CacheError>`: The response body bytes, or a fetch/write error.
 pub(crate) async fn fetch_url(url: &str) -> Result<Vec<u8>, CacheError> {
     let client: Client = build_client()?;
     let response: reqwest::Response = client
@@ -118,6 +244,15 @@ pub(crate) async fn fetch_url(url: &str) -> Result<Vec<u8>, CacheError> {
     Ok(bytes)
 }
 
+/// Fetches a URL and returns both the final URL (after redirects) and the response body.
+///
+/// # Arguments
+///
+/// - `&str`: The URL to fetch.
+///
+/// # Returns
+///
+/// - `Result<(String, Vec<u8>), CacheError>`: A tuple of (final_url, body_bytes), or a fetch error.
 async fn fetch_url_with_final_url(url: &str) -> Result<(String, Vec<u8>), CacheError> {
     let client: Client = build_client()?;
     let response: reqwest::Response = client
@@ -143,6 +278,16 @@ async fn fetch_url_with_final_url(url: &str) -> Result<(String, Vec<u8>), CacheE
     Ok((final_url, bytes))
 }
 
+/// Writes data to a file atomically by first writing to a temporary file then renaming.
+///
+/// # Arguments
+///
+/// - `&Path`: The target file path.
+/// - `&[u8]`: The data to write.
+///
+/// # Returns
+///
+/// - `Result<(), CacheError>`: Ok if the write succeeded, or a write error.
 async fn atomic_write(target: &Path, data: &[u8]) -> Result<(), CacheError> {
     if let Some(parent) = target.parent() {
         create_dir_all(parent)
@@ -159,6 +304,15 @@ async fn atomic_write(target: &Path, data: &[u8]) -> Result<(), CacheError> {
     Ok(())
 }
 
+/// Deploys bundled cache files synchronously if no active deployment exists.
+///
+/// # Arguments
+///
+/// - `&AppHandle`: The Tauri application handle.
+///
+/// # Returns
+///
+/// - `bool`: `true` if bundled files were deployed or an active deployment already exists, `false` otherwise.
 pub(crate) fn deploy_bundled_cache_sync(app_handle: &AppHandle) -> bool {
     if BUNDLED_FILES.is_empty() {
         return false;
@@ -200,6 +354,15 @@ pub(crate) fn deploy_bundled_cache_sync(app_handle: &AppHandle) -> bool {
     true
 }
 
+/// Checks whether an active cache deployment exists.
+///
+/// # Arguments
+///
+/// - `&AppHandle`: The Tauri application handle.
+///
+/// # Returns
+///
+/// - `bool`: `true` if an active version is present, `false` otherwise.
 pub(crate) fn has_active_cache(app_handle: &AppHandle) -> bool {
     let cache_root: PathBuf = match get_cache_root(app_handle) {
         Ok(directory) => directory,
@@ -208,6 +371,18 @@ pub(crate) fn has_active_cache(app_handle: &AppHandle) -> bool {
     read_active_version_sync(&cache_root).is_some()
 }
 
+/// Fetches a full snapshot of the remote HTML page and all linked resources.
+///
+/// Verifies that all critical resources (scripts, stylesheets, images, WASM) are present
+/// before switching the active version pointer.
+///
+/// # Arguments
+///
+/// - `&Path`: The cache root directory path.
+///
+/// # Returns
+///
+/// - `Result<String, CacheError>`: The new version name on success, or a fetch/write error.
 async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
     let (final_url, html_bytes) = fetch_url_with_final_url(REMOTE_URL).await?;
     let html: String = String::from_utf8_lossy(&html_bytes).to_string();
@@ -308,6 +483,11 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
     Ok(version_name)
 }
 
+/// Performs the initial cache fetch, retrying on failure until successful.
+///
+/// # Arguments
+///
+/// - `AppHandle`: The Tauri application handle (consumed for async task ownership).
 pub(crate) async fn initial_fetch(app_handle: AppHandle) {
     euv_log!("[EUV] initial fetch started");
     let cache_root: PathBuf = match get_cache_root(&app_handle) {
@@ -330,6 +510,13 @@ pub(crate) async fn initial_fetch(app_handle: AppHandle) {
     }
 }
 
+/// Performs a background cache update, retrying on failure until successful.
+///
+/// The updated cache will take effect on the next application launch.
+///
+/// # Arguments
+///
+/// - `AppHandle`: The Tauri application handle (consumed for async task ownership).
 pub(crate) async fn background_update(app_handle: AppHandle) {
     euv_log!("[EUV] background update started");
     let cache_root: PathBuf = match get_cache_root(&app_handle) {
@@ -354,6 +541,15 @@ pub(crate) async fn background_update(app_handle: AppHandle) {
     }
 }
 
+/// Derives the base URL from a final URL by stripping the last path segment.
+///
+/// # Arguments
+///
+/// - `&str`: The final URL after redirects.
+///
+/// # Returns
+///
+/// - `String`: The base URL for resolving relative resource paths.
 fn derive_base_url(final_url: &str) -> String {
     let url: String = final_url.trim_end_matches('/').to_string();
     if final_url.ends_with('/') {
@@ -367,6 +563,19 @@ fn derive_base_url(final_url: &str) -> String {
     url
 }
 
+/// Fetches all linked resources (scripts, stylesheets, images) from an HTML page.
+///
+/// Also discovers and fetches transitive dependencies in JS files (WASM, ES module imports).
+///
+/// # Arguments
+///
+/// - `&Path`: The version directory where resources should be saved.
+/// - `&str`: The HTML content to parse for resource links.
+/// - `&str`: The final URL of the page, used to derive the base URL.
+///
+/// # Returns
+///
+/// - `usize`: The total number of resources successfully fetched.
 async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str) -> usize {
     let mut paths: Vec<String> = Vec::new();
     extract_attr_values(html, "script", "src", &mut paths);
@@ -375,7 +584,7 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str)
     extract_module_imports(html, &mut paths);
     let base_url: String = derive_base_url(final_url);
     euv_log!("[EUV] resource base URL: {}", base_url);
-    let fetched: Vec<(String, Vec<u8>)> = fetch_resource_list(&paths, &base_url, version_dir).await;
+    let fetched: FetchResult = fetch_resource_list(&paths, &base_url, version_dir).await;
     let mut total_count: usize = fetched.len();
     let mut extra_paths: Vec<String> = Vec::new();
     for (clean_path, data) in &fetched {
@@ -394,13 +603,26 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str)
     });
     if !extra_paths.is_empty() {
         euv_log!("[EUV] found {} extra dependencies in JS", extra_paths.len());
-        let extra_fetched: Vec<(String, Vec<u8>)> =
+        let extra_fetched: FetchResult =
             fetch_resource_list(&extra_paths, &base_url, version_dir).await;
         total_count += extra_fetched.len();
     }
     total_count
 }
 
+/// Fetches a list of resource URLs concurrently and writes them to disk.
+///
+/// Skips data URIs, absolute HTTP URLs, and protocol-relative URLs.
+///
+/// # Arguments
+///
+/// - `&[String]`: The list of relative resource paths to fetch.
+/// - `&str`: The base URL for resolving relative paths.
+/// - `&Path`: The version directory where resources should be saved.
+///
+/// # Returns
+///
+/// - `FetchResult`: A vector of (clean_path, data) tuples for successfully fetched resources.
 async fn fetch_resource_list(paths: &[String], base_url: &str, version_dir: &Path) -> FetchResult {
     let results: SharedResults = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let mut handles: Vec<tauri::async_runtime::JoinHandle<()>> = Vec::new();
@@ -447,6 +669,15 @@ async fn fetch_resource_list(paths: &[String], base_url: &str, version_dir: &Pat
     mutex.into_inner()
 }
 
+/// Extracts WASM file references from JavaScript source code.
+///
+/// Looks for `.wasm` string literals and resolves them relative to the JS file's directory.
+///
+/// # Arguments
+///
+/// - `&str`: The JavaScript source code.
+/// - `&str`: The relative path of the JS file (used to resolve relative WASM paths).
+/// - `&mut Vec<String>`: The collection to append discovered WASM paths to.
 fn extract_wasm_references(js: &str, js_path: &str, results: &mut Vec<String>) {
     let js_dir: &str = if let Some(pos) = js_path.rfind('/') {
         &js_path[..pos]
@@ -486,6 +717,14 @@ fn extract_wasm_references(js: &str, js_path: &str, results: &mut Vec<String>) {
     }
 }
 
+/// Extracts ES module import paths from source code.
+///
+/// Looks for `from '...'` or `from "..."` patterns with relative paths.
+///
+/// # Arguments
+///
+/// - `&str`: The source code to parse.
+/// - `&mut Vec<String>`: The collection to append discovered import paths to.
 fn extract_module_imports(html: &str, results: &mut Vec<String>) {
     let mut pos: usize = 0;
     while pos < html.len() {
@@ -505,6 +744,14 @@ fn extract_module_imports(html: &str, results: &mut Vec<String>) {
     }
 }
 
+/// Extracts attribute values from HTML tags matching the specified tag and attribute name.
+///
+/// # Arguments
+///
+/// - `&str`: The HTML content to parse.
+/// - `&str`: The tag name to search for (e.g., `"script"`, `"link"`).
+/// - `&str`: The attribute name to extract (e.g., `"src"`, `"href"`).
+/// - `&mut Vec<String>`: The collection to append discovered attribute values to.
 fn extract_attr_values(html: &str, tag: &str, attr: &str, results: &mut Vec<String>) {
     let tag_pattern: String = format!("<{}", tag.to_lowercase());
     let attr_pattern: String = format!("{}=", attr.to_lowercase());
@@ -529,6 +776,15 @@ fn extract_attr_values(html: &str, tag: &str, attr: &str, results: &mut Vec<Stri
     }
 }
 
+/// Extracts a single-quoted or double-quoted value from the beginning of a string.
+///
+/// # Arguments
+///
+/// - `&str`: The input string starting with an optional quote character.
+///
+/// # Returns
+///
+/// - `&str`: The extracted value between quotes, or an empty string if no quoted value is found.
 fn extract_quoted_value(input: &str) -> &str {
     let trimmed: &str = input.trim_start();
     if let Some(remainder) = trimmed.strip_prefix('"')
@@ -544,6 +800,11 @@ fn extract_quoted_value(input: &str) -> &str {
     ""
 }
 
+/// Emits a reload event to the frontend via Tauri.
+///
+/// # Arguments
+///
+/// - `&AppHandle`: The Tauri application handle used to emit the event.
 pub(crate) fn notify_reload(app_handle: &AppHandle) {
     use tauri::Emitter;
     if let Err(error) = app_handle.emit("euv://reload", ()) {
@@ -553,6 +814,15 @@ pub(crate) fn notify_reload(app_handle: &AppHandle) {
     }
 }
 
+/// Returns the MIME type string for a given file path based on its extension.
+///
+/// # Arguments
+///
+/// - `&str`: The file path or extension to look up.
+///
+/// # Returns
+///
+/// - `&'static str`: The corresponding MIME type string, or `"application/octet-stream"` as fallback.
 pub(crate) fn mime_for(path: &str) -> &'static str {
     let lower_path: String = path.to_lowercase();
     if lower_path.ends_with(".html") || lower_path.ends_with(".htm") {
@@ -590,6 +860,19 @@ pub(crate) fn mime_for(path: &str) -> &'static str {
     }
 }
 
+/// Handles the custom `euv://` URI scheme protocol for serving cached resources.
+///
+/// Reads the requested file from the active cache directory and injects
+/// the reload listener script and debug panel (in debug mode) into index.html.
+///
+/// # Arguments
+///
+/// - `&AppHandle`: The Tauri application handle.
+/// - `http::Request<Vec<u8>>`: The incoming HTTP request.
+///
+/// # Returns
+///
+/// - `http::Response<Cow<'static, [u8]>>`: The HTTP response with the file content or an error status.
 pub(crate) fn handle_euv_scheme(
     app_handle: &AppHandle,
     request: http::Request<Vec<u8>>,
@@ -691,6 +974,15 @@ pub(crate) fn handle_euv_scheme(
     }
 }
 
+/// Tauri command that returns cached page metadata.
+///
+/// # Arguments
+///
+/// - `AppHandle`: The Tauri application handle.
+///
+/// # Returns
+///
+/// - `Result<CachedPage, String>`: The cached page info on success, or an error message string.
 #[tauri::command]
 pub(crate) async fn load_cached_resource(app_handle: AppHandle) -> Result<CachedPage, String> {
     let cache_root: PathBuf =

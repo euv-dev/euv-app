@@ -1,13 +1,28 @@
 include!(concat!(env!("OUT_DIR"), "/config_generated.rs"));
+include!(concat!(env!("OUT_DIR"), "/bundled_cache_data.rs"));
 
+/// The filename used for the active version pointer symlink.
 pub(crate) const ACTIVE_LINK: &str = "active";
+
+/// The prefix for version directory names.
 pub(crate) const VERSION_PREFIX: &str = "v_";
+
+/// HTTP client timeout in seconds for fetch operations.
 pub(crate) const FETCH_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum allowed response body size in bytes (10 MiB).
 pub(crate) const MAX_BODY_SIZE: usize = 10485760;
+
+/// Interval in milliseconds between fetch retry attempts.
 pub(crate) const RETRY_INTERVAL_MILLIS: u64 = 1000;
+
+/// The custom URI scheme name used for serving cached resources.
 pub(crate) const SCHEME_NAME: &str = "euv";
+
+/// Maximum number of old version directories to keep.
 pub(crate) const MAX_KEPT_VERSIONS: usize = 2;
 
+/// JavaScript snippet injected into index.html to listen for reload events from the Tauri backend.
 pub(crate) const RELOAD_LISTENER_SCRIPT: &str = r#"<script>
 (function(){
   if(window.__TAURI__&&window.__TAURI__.event){
@@ -30,6 +45,9 @@ pub(crate) const RELOAD_LISTENER_SCRIPT: &str = r#"<script>
 })();
 </script>"#;
 
+/// Debug panel HTML snippet injected into index.html in debug builds.
+///
+/// Displays cache source information and a log viewer for real-time debugging.
 #[cfg(debug_assertions)]
 pub(crate) const DEBUG_PANEL_SCRIPT: &str = r#"<script>
 (function(){
