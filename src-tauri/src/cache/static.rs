@@ -1,3 +1,4 @@
+#[cfg(debug_assertions)]
 use super::*;
 
 /// A global handle to the Tauri `AppHandle`, available only in debug builds.

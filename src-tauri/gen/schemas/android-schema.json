@@ -177,16 +177,22 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Default permissions for euv-app commands\n#### This default permission set includes:\n\n- `allow-load-cached-resource`",
+          "description": "Default permissions for euv-app commands\n#### This default permission set includes:\n\n- `allow-load-cached-resource`\n- `allow-resolve-bridge-group-permissions`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for euv-app commands\n#### This default permission set includes:\n\n- `allow-load-cached-resource`"
+          "markdownDescription": "Default permissions for euv-app commands\n#### This default permission set includes:\n\n- `allow-load-cached-resource`\n- `allow-resolve-bridge-group-permissions`"
         },
         {
           "description": "Enables the load_cached_resource command to serve cached web resources",
           "type": "string",
           "const": "allow-load-cached-resource",
           "markdownDescription": "Enables the load_cached_resource command to serve cached web resources"
+        },
+        {
+          "description": "Enables the resolve_bridge_group_permissions command to query Android permission groups",
+          "type": "string",
+          "const": "allow-resolve-bridge-group-permissions",
+          "markdownDescription": "Enables the resolve_bridge_group_permissions command to query Android permission groups"
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

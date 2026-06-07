@@ -8,6 +8,9 @@ mod r#type;
 
 pub use r#fn::*;
 
-pub(crate) use {r#const::*, r#enum::*, r#static::*, r#struct::*, r#type::*};
+pub(crate) use {r#const::*, r#enum::*, r#struct::*, r#type::*};
+
+#[cfg(debug_assertions)]
+pub(crate) use r#static::*;
 
 use super::*;

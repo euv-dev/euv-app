@@ -10,10 +10,12 @@ pub use cache::*;
 
 pub(crate) use bridge::*;
 
+#[cfg(debug_assertions)]
+pub(crate) use std::sync::OnceLock;
 pub(crate) use std::{
     borrow::Cow,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
