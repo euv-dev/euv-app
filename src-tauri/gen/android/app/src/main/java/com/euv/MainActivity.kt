@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
 import android.view.View
@@ -32,6 +33,33 @@ import androidx.core.view.WindowInsetsControllerCompat
 class MainActivity : TauriActivity() {
 
     private var splashView: View? = null
+    private var mainWebView: WebView? = null
+    private var pendingPermissionCallback: String? = null
+    private var pendingPermissionResults: MutableMap<String, Boolean> = mutableMapOf()
+    private var pendingPermissionsToRequest: Array<String> = emptyArray()
+
+    private val multiPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results: Map<String, Boolean> ->
+        Log.d("EUV_PERM", "Permission results: $results")
+        pendingPermissionResults.putAll(results)
+        val allProcessed = pendingPermissionsToRequest.all { perm ->
+            pendingPermissionResults.containsKey(perm)
+        }
+        if (allProcessed && pendingPermissionCallback != null && mainWebView != null) {
+            val callbackId = pendingPermissionCallback!!
+            val jsResults = pendingPermissionResults.entries.joinToString(",") { (perm, granted) ->
+                "{\"permission\":\"$perm\",\"granted\":$granted}"
+            }
+            val js = "window.__euvBridgeCallback && window.__euvBridgeCallback('$callbackId',[$jsResults])"
+            mainWebView?.post {
+                mainWebView?.evaluateJavascript(js, null)
+            }
+            pendingPermissionCallback = null
+            pendingPermissionResults.clear()
+        }
+    }
+
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted: Boolean ->
@@ -54,12 +82,7 @@ class MainActivity : TauriActivity() {
         }
         window.setBackgroundDrawable(ColorDrawable(Color.parseColor(AppConfig.BACKGROUND_COLOR)))
         super.onCreate(savedInstanceState)
-
-        // Add splash overlay IMMEDIATELY after super.onCreate() so it covers the
-        // white gap between Android system splash dismissal and WebView rendering.
-        // This must happen here (not in onWebViewCreate) to avoid the flash.
         addSplashOverlay()
-
         if (AppConfig.IMMERSIVE_MODE) {
             enableImmersiveMode()
         }
@@ -107,8 +130,6 @@ class MainActivity : TauriActivity() {
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
             elevation = 100f
-
-            // Logo image centered
             val logo = ImageView(context).apply {
                 setImageResource(R.mipmap.ic_launcher)
                 layoutParams = FrameLayout.LayoutParams(
@@ -221,10 +242,6 @@ class MainActivity : TauriActivity() {
         }
     }
 
-    /**
-     * JavaScript interface to allow the WebView content to open external links
-     * in the system browser.
-     */
     inner class ExternalLinkHandler {
         @JavascriptInterface
         fun openUrl(url: String) {
@@ -238,9 +255,137 @@ class MainActivity : TauriActivity() {
         }
     }
 
+    inner class EuvBridgeNative {
+        @JavascriptInterface
+        fun check(permission: String): Boolean {
+            return ContextCompat.checkSelfPermission(
+                this@MainActivity, permission
+            ) == PackageManager.PERMISSION_GRANTED
+        }
+
+        @JavascriptInterface
+        fun checkMultiple(permissionsJson: String): String {
+            val permissions: Array<String> = try {
+                val jsonArray = org.json.JSONArray(permissionsJson)
+                (0 until jsonArray.length()).map { jsonArray.getString(it) }.toTypedArray()
+            } catch (e: Exception) {
+                Log.e("EUV_PERM", "Failed to parse permissions JSON: $permissionsJson", e)
+                return "[]"
+            }
+            val results = permissions.map { perm ->
+                val granted = ContextCompat.checkSelfPermission(
+                    this@MainActivity, perm
+                ) == PackageManager.PERMISSION_GRANTED
+                "{\"permission\":\"$perm\",\"granted\":$granted}"
+            }
+            return "[${results.joinToString(",")}]"
+        }
+
+        @JavascriptInterface
+        fun request(permissionsJson: String, callbackId: String) {
+            val permissions: Array<String> = try {
+                val jsonArray = org.json.JSONArray(permissionsJson)
+                (0 until jsonArray.length()).map { jsonArray.getString(it) }.toTypedArray()
+            } catch (e: Exception) {
+                Log.e("EUV_PERM", "Failed to parse permissions JSON: $permissionsJson", e)
+                if (mainWebView != null) {
+                    val js = "window.__euvBridgeCallback && window.__euvBridgeCallback('$callbackId',[])"
+                    mainWebView?.post {
+                        mainWebView?.evaluateJavascript(js, null)
+                    }
+                }
+                return
+            }
+            val alreadyGranted = permissions.filter { perm ->
+                ContextCompat.checkSelfPermission(
+                    this@MainActivity, perm
+                ) == PackageManager.PERMISSION_GRANTED
+            }
+            val toRequest = permissions.filter { perm ->
+                ContextCompat.checkSelfPermission(
+                    this@MainActivity, perm
+                ) != PackageManager.PERMISSION_GRANTED
+            }
+            if (toRequest.isEmpty()) {
+                val results = permissions.map { perm ->
+                    "{\"permission\":\"$perm\",\"granted\":true}"
+                }
+                val js = "window.__euvBridgeCallback && window.__euvBridgeCallback('$callbackId',[${results.joinToString(",")}])"
+                mainWebView?.post {
+                    mainWebView?.evaluateJavascript(js, null)
+                }
+                return
+            }
+            pendingPermissionCallback = callbackId
+            pendingPermissionResults.clear()
+            pendingPermissionResults.putAll(alreadyGranted.associateWith { true })
+            pendingPermissionsToRequest = permissions
+            runOnUiThread {
+                multiPermissionLauncher.launch(toRequest.toTypedArray())
+            }
+        }
+
+        @JavascriptInterface
+        fun requestGroup(group: String, callbackId: String) {
+            val permissions = PermissionGroups.getPermissions(group)
+            if (permissions.isEmpty()) {
+                val js = "window.__euvBridgeCallback && window.__euvBridgeCallback('$callbackId',[])"
+                mainWebView?.post {
+                    mainWebView?.evaluateJavascript(js, null)
+                }
+                return
+            }
+            val permissionsJson = org.json.JSONArray(permissions).toString()
+            request(permissionsJson, callbackId)
+        }
+
+        @JavascriptInterface
+        fun checkGroup(group: String): String {
+            val permissions = PermissionGroups.getPermissions(group)
+            val results = permissions.map { perm ->
+                val granted = ContextCompat.checkSelfPermission(
+                    this@MainActivity, perm
+                ) == PackageManager.PERMISSION_GRANTED
+                "{\"permission\":\"$perm\",\"granted\":$granted}"
+            }
+            return "[${results.joinToString(",")}]"
+        }
+
+        @JavascriptInterface
+        fun checkAll(): String {
+            val permissions = PermissionGroups.getPermissions("all")
+            val results = permissions.map { perm ->
+                val granted = ContextCompat.checkSelfPermission(
+                    this@MainActivity, perm
+                ) == PackageManager.PERMISSION_GRANTED
+                "{\"permission\":\"$perm\",\"granted\":$granted}"
+            }
+            return "[${results.joinToString(",")}]"
+        }
+
+        @JavascriptInterface
+        fun requestAll(callbackId: String) {
+            requestGroup("all", callbackId)
+        }
+
+        @JavascriptInterface
+        fun openSettings() {
+            runOnUiThread {
+                try {
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    intent.data = Uri.fromParts("package", this@MainActivity.packageName, null)
+                    this@MainActivity.startActivity(intent)
+                } catch (e: Exception) {
+                    Log.e("EUV_PERM", "Failed to open app settings", e)
+                }
+            }
+        }
+    }
+
     override fun onWebViewCreate(webView: WebView) {
         Log.d("EUV_CACHE", "onWebViewCreate() at ${System.currentTimeMillis()}")
         super.onWebViewCreate(webView)
+        mainWebView = webView
         webView.settings.apply {
             @Suppress("DEPRECATION")
             allowFileAccessFromFileURLs = true
@@ -275,8 +420,6 @@ class MainActivity : TauriActivity() {
                 return true
             }
         }
-
-        // Inject CSS anti-aliasing and text rendering optimizations
         if (AppConfig.ANTI_ALIASING) {
             webView.evaluateJavascript("""
                 (function() {
@@ -289,19 +432,14 @@ class MainActivity : TauriActivity() {
                 })();
             """.trimIndent(), null)
         }
-
-        // Add JavaScript interface for opening external links
         webView.addJavascriptInterface(ExternalLinkHandler(), "NativeApp")
-
-        // Poll WebView: wait for euv.localhost page to fully render before removing splash.
-        // We check that the URL has navigated to euv.localhost AND that the page body has
-        // meaningful content (WASM app has rendered), to avoid a white flash.
+        webView.addJavascriptInterface(EuvBridgeNative(), "EuvBridgeNative")
+        injectBridgeScript(webView)
         val handler = Handler(Looper.getMainLooper())
         val pollRunnable = object : Runnable {
             override fun run() {
                 val currentUrl = webView.url ?: ""
                 if (currentUrl.contains("euv.localhost")) {
-                    // Check if WASM app has rendered content into the page
                     webView.evaluateJavascript(
                         "(document.querySelector('canvas') !== null || document.body.children.length > 1).toString()"
                     ) { result ->
@@ -312,8 +450,6 @@ class MainActivity : TauriActivity() {
                             removeSplash()
                             injectExternalLinkInterceptor(webView)
                         } else {
-                            // Tight poll once the app page is loaded so the splash
-                            // is dismissed within ~one frame of first render.
                             handler.postDelayed(this, 32)
                         }
                     }
@@ -322,11 +458,82 @@ class MainActivity : TauriActivity() {
                 }
             }
         }
-        // Start polling almost immediately instead of waiting a fixed 300ms,
-        // which previously kept the splash on screen well past first render.
         handler.post(pollRunnable)
-
         Log.d("EUV_CACHE", "WebView setup done at ${System.currentTimeMillis()}")
+    }
+
+    private fun injectBridgeScript(webView: WebView) {
+        val js = """
+            (function() {
+                if (window.__euvBridgeInstalled) return;
+                window.__euvBridgeInstalled = true;
+                window.__euvBridgeCallbacks = {};
+                window.__euvBridgeCallbackId = 0;
+
+                window.__euvBridgeCallback = function(callbackId, results) {
+                    var cb = window.__euvBridgeCallbacks[callbackId];
+                    if (cb) {
+                        delete window.__euvBridgeCallbacks[callbackId];
+                        cb(results);
+                    }
+                };
+
+                window.EuvBridge = {
+                    check: function(permission) {
+                        if (!window.EuvBridgeNative) return { permission: permission, granted: true };
+                        var granted = window.EuvBridgeNative.check(permission);
+                        return { permission: permission, granted: granted };
+                    },
+                    checkMultiple: function(permissions) {
+                        if (!window.EuvBridgeNative) return permissions.map(function(p) { return { permission: p, granted: true }; });
+                        var json = JSON.stringify(permissions);
+                        var resultStr = window.EuvBridgeNative.checkMultiple(json);
+                        try { return JSON.parse(resultStr); } catch(e) { return []; }
+                    },
+                    request: function(permissions) {
+                        return new Promise(function(resolve) {
+                            if (!window.EuvBridgeNative) { resolve(permissions.map(function(p) { return { permission: p, granted: true }; })); return; }
+                            var callbackId = '__perm_' + (++window.__euvBridgeCallbackId);
+                            window.__euvBridgeCallbacks[callbackId] = resolve;
+                            var json = JSON.stringify(permissions);
+                            window.EuvBridgeNative.request(json, callbackId);
+                        });
+                    },
+                    requestGroup: function(group) {
+                        return new Promise(function(resolve) {
+                            if (!window.EuvBridgeNative) { resolve([]); return; }
+                            var callbackId = '__perm_' + (++window.__euvBridgeCallbackId);
+                            window.__euvBridgeCallbacks[callbackId] = resolve;
+                            window.EuvBridgeNative.requestGroup(group, callbackId);
+                        });
+                    },
+                    checkGroup: function(group) {
+                        if (!window.EuvBridgeNative) return [];
+                        var resultStr = window.EuvBridgeNative.checkGroup(group);
+                        try { return JSON.parse(resultStr); } catch(e) { return []; }
+                    },
+                    checkAll: function() {
+                        if (!window.EuvBridgeNative) return [];
+                        var resultStr = window.EuvBridgeNative.checkAll();
+                        try { return JSON.parse(resultStr); } catch(e) { return []; }
+                    },
+                    requestAll: function() {
+                        return new Promise(function(resolve) {
+                            if (!window.EuvBridgeNative) { resolve([]); return; }
+                            var callbackId = '__perm_' + (++window.__euvBridgeCallbackId);
+                            window.__euvBridgeCallbacks[callbackId] = resolve;
+                            window.EuvBridgeNative.requestAll(callbackId);
+                        });
+                    },
+                    openSettings: function() {
+                        if (window.EuvBridgeNative) window.EuvBridgeNative.openSettings();
+                    }
+                };
+                console.log('[EUV] Bridge installed');
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js, null)
+        Log.d("EUV_CACHE", "Bridge JS injected")
     }
 
     private fun injectExternalLinkInterceptor(webView: WebView) {
@@ -351,7 +558,6 @@ class MainActivity : TauriActivity() {
                         }
                     }
                 }, true);
-                // Also handle window.open
                 var originalOpen = window.open;
                 window.open = function(url, target, features) {
                     if (url && url.indexOf('http') === 0 &&

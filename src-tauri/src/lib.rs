@@ -5,9 +5,10 @@
 #[macro_use]
 mod macros;
 
+mod bridge;
 mod cache;
 
-pub use cache::run;
+pub use {bridge::*, cache::*};
 
 pub(crate) use std::{
     borrow::Cow,
