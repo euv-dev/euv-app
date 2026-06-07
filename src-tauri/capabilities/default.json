@@ -5,7 +5,8 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "allow-load-cached-resource"
+    "allow-load-cached-resource",
+    "allow-resolve-bridge-group-permissions"
   ],
   "platforms": ["android", "linux", "macOS", "windows"],
   "remote": {

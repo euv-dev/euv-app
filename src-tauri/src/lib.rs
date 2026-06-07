@@ -2,13 +2,13 @@
 //!
 //! A Tauri-based application with offline cache and remote resource synchronization.
 
-#[macro_use]
-mod macros;
-
 mod bridge;
 mod cache;
+mod log;
 
-pub use {bridge::*, cache::*};
+pub use cache::*;
+
+pub(crate) use bridge::*;
 
 pub(crate) use std::{
     borrow::Cow,

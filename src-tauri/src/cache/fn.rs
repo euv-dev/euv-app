@@ -17,7 +17,7 @@ pub fn run() {
         .setup(|app: &mut App| {
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
-                    .level(log::LevelFilter::Info)
+                    .level(::log::LevelFilter::Info)
                     .build(),
             )?;
             let handle: AppHandle = app.handle().clone();
@@ -26,10 +26,10 @@ pub fn run() {
             deploy_bundled_cache_sync(&handle);
             spawn(async move {
                 if has_active_cache(&handle) {
-                    euv_log!("[EUV] cache ready, background update");
+                    crate::euv_log!("[EUV] cache ready, background update");
                     background_update(handle).await;
                 } else {
-                    euv_log!("[EUV] no cache, initial fetch");
+                    crate::euv_log!("[EUV] no cache, initial fetch");
                     initial_fetch(handle).await;
                 }
             });
@@ -42,7 +42,10 @@ pub fn run() {
                 handle_euv_scheme(context.app_handle(), request)
             },
         )
-        .invoke_handler(generate_handler![load_cached_resource])
+        .invoke_handler(generate_handler![
+            load_cached_resource,
+            resolve_bridge_group_permissions
+        ])
         .build(generate_context!())
         .expect("fatal: app failed to start")
         .run(|_: &AppHandle, _: RunEvent| {});
@@ -135,7 +138,7 @@ async fn switch_active_version(cache_root: &Path, version_name: &str) -> Result<
     rename(&temporary, &pointer)
         .await
         .map_err(|error: std::io::Error| CacheError::Write(error.to_string()))?;
-    euv_log!("[EUV] switched active: {}", version_name);
+    crate::euv_log!("[EUV] switched active: {}", version_name);
     Ok(())
 }
 
@@ -158,7 +161,7 @@ fn switch_active_version_sync(cache_root: &Path, version_name: &str) -> Result<(
         .map_err(|error: std::io::Error| CacheError::Write(error.to_string()))?;
     std::fs::rename(&temporary, &pointer)
         .map_err(|error: std::io::Error| CacheError::Write(error.to_string()))?;
-    euv_log!("[EUV] switched active: {}", version_name);
+    crate::euv_log!("[EUV] switched active: {}", version_name);
     Ok(())
 }
 
@@ -192,7 +195,7 @@ async fn cleanup_old_versions(cache_root: &Path, current: &str) {
     let to_remove: usize = versions.len() - max_old;
     for name in &versions[..to_remove] {
         remove_dir_all(cache_root.join(name)).await.ok();
-        euv_log!("[EUV] removed old version: {}", name);
+        crate::euv_log!("[EUV] removed old version: {}", name);
     }
 }
 
@@ -322,7 +325,7 @@ pub(crate) fn deploy_bundled_cache_sync(app_handle: &AppHandle) -> bool {
         Err(_) => return false,
     };
     if let Some(existing) = read_active_version_sync(&cache_root) {
-        euv_log!("[EUV] reusing existing active deployment: {existing}");
+        crate::euv_log!("[EUV] reusing existing active deployment: {existing}");
         return true;
     }
     if std::fs::create_dir_all(&cache_root).is_err() {
@@ -350,7 +353,7 @@ pub(crate) fn deploy_bundled_cache_sync(app_handle: &AppHandle) -> bool {
     if switch_active_version_sync(&cache_root, &version_name).is_err() {
         return false;
     }
-    euv_log!("[EUV] deployed {count} bundled files, serving: {version_name}");
+    crate::euv_log!("[EUV] deployed {count} bundled files, serving: {version_name}");
     true
 }
 
@@ -389,7 +392,7 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
     if html.is_empty() {
         return Err(CacheError::Fetch("empty HTML".to_string()));
     }
-    euv_log!("[EUV] final URL after redirects: {}", final_url);
+    crate::euv_log!("[EUV] final URL after redirects: {}", final_url);
     let version_name: String = new_version_name();
     let version_dir: PathBuf = cache_root.join(&version_name);
     create_dir_all(&version_dir)
@@ -421,7 +424,7 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
             .to_string();
         let file_path: PathBuf = version_dir.join(&clean);
         if !file_path.exists() {
-            euv_log!("[EUV] missing critical resource: {}", clean);
+            crate::euv_log!("[EUV] missing critical resource: {}", clean);
             remove_dir_all(&version_dir).await.ok();
             return Err(CacheError::Fetch(format!(
                 "incomplete snapshot: missing {}",
@@ -466,7 +469,7 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
             .to_string();
         let file_path: PathBuf = version_dir.join(&clean);
         if !file_path.exists() {
-            euv_log!("[EUV] missing critical WASM resource: {}", clean);
+            crate::euv_log!("[EUV] missing critical WASM resource: {}", clean);
             remove_dir_all(&version_dir).await.ok();
             return Err(CacheError::Fetch(format!(
                 "incomplete snapshot: missing WASM {}",
@@ -474,7 +477,7 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
             )));
         }
     }
-    euv_log!(
+    crate::euv_log!(
         "[EUV] snapshot complete: {} resources fetched, all critical files verified",
         resource_count
     );
@@ -489,7 +492,7 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
 ///
 /// - `AppHandle`: The Tauri application handle (consumed for async task ownership).
 pub(crate) async fn initial_fetch(app_handle: AppHandle) {
-    euv_log!("[EUV] initial fetch started");
+    crate::euv_log!("[EUV] initial fetch started");
     let cache_root: PathBuf = match get_cache_root(&app_handle) {
         Ok(directory) => directory,
         Err(_) => return,
@@ -498,12 +501,12 @@ pub(crate) async fn initial_fetch(app_handle: AppHandle) {
     loop {
         match fetch_full_snapshot(&cache_root).await {
             Ok(version) => {
-                euv_log!("[EUV] initial fetch done: {}", version);
+                crate::euv_log!("[EUV] initial fetch done: {}", version);
                 notify_reload(&app_handle);
                 return;
             }
             Err(error) => {
-                euv_log!("[EUV] initial fetch failed: {}, retrying", error);
+                crate::euv_log!("[EUV] initial fetch failed: {}, retrying", error);
                 tokio::time::sleep(Duration::from_millis(RETRY_INTERVAL_MILLIS)).await;
             }
         }
@@ -518,7 +521,7 @@ pub(crate) async fn initial_fetch(app_handle: AppHandle) {
 ///
 /// - `AppHandle`: The Tauri application handle (consumed for async task ownership).
 pub(crate) async fn background_update(app_handle: AppHandle) {
-    euv_log!("[EUV] background update started");
+    crate::euv_log!("[EUV] background update started");
     let cache_root: PathBuf = match get_cache_root(&app_handle) {
         Ok(directory) => directory,
         Err(_) => return,
@@ -527,14 +530,14 @@ pub(crate) async fn background_update(app_handle: AppHandle) {
     loop {
         match fetch_full_snapshot(&cache_root).await {
             Ok(version) => {
-                euv_log!(
+                crate::euv_log!(
                     "[EUV] background update done: {}, will take effect on next launch",
                     version
                 );
                 return;
             }
             Err(error) => {
-                euv_log!("[EUV] background update failed: {}, retrying", error);
+                crate::euv_log!("[EUV] background update failed: {}, retrying", error);
                 tokio::time::sleep(Duration::from_millis(RETRY_INTERVAL_MILLIS)).await;
             }
         }
@@ -583,7 +586,7 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str)
     extract_attr_values(html, "img", "src", &mut paths);
     extract_module_imports(html, &mut paths);
     let base_url: String = derive_base_url(final_url);
-    euv_log!("[EUV] resource base URL: {}", base_url);
+    crate::euv_log!("[EUV] resource base URL: {}", base_url);
     let fetched: FetchResult = fetch_resource_list(&paths, &base_url, version_dir).await;
     let mut total_count: usize = fetched.len();
     let mut extra_paths: Vec<String> = Vec::new();
@@ -602,7 +605,7 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str)
         !fetched.iter().any(|(c, _)| c == &clean)
     });
     if !extra_paths.is_empty() {
-        euv_log!("[EUV] found {} extra dependencies in JS", extra_paths.len());
+        crate::euv_log!("[EUV] found {} extra dependencies in JS", extra_paths.len());
         let extra_fetched: FetchResult =
             fetch_resource_list(&extra_paths, &base_url, version_dir).await;
         total_count += extra_fetched.len();
@@ -645,18 +648,18 @@ async fn fetch_resource_list(paths: &[String], base_url: &str, version_dir: &Pat
             match fetch_url(&url).await {
                 Ok(data) => {
                     if data.is_empty() {
-                        euv_log!("[EUV] skipped empty resource: {}", clean);
+                        crate::euv_log!("[EUV] skipped empty resource: {}", clean);
                         return;
                     }
                     if let Err(error) = atomic_write(&local, &data).await {
-                        euv_log!("[EUV] write failed {}: {}", clean, error);
+                        crate::euv_log!("[EUV] write failed {}: {}", clean, error);
                     } else {
-                        euv_log!("[EUV] fetched: {} ({} bytes)", clean, data.len());
+                        crate::euv_log!("[EUV] fetched: {} ({} bytes)", clean, data.len());
                         results_clone.lock().await.push((clean, data));
                     }
                 }
                 Err(error) => {
-                    euv_log!("[EUV] fetch failed {}: {}", clean, error);
+                    crate::euv_log!("[EUV] fetch failed {}: {}", clean, error);
                 }
             }
         }));
@@ -808,9 +811,9 @@ fn extract_quoted_value(input: &str) -> &str {
 pub(crate) fn notify_reload(app_handle: &AppHandle) {
     use tauri::Emitter;
     if let Err(error) = app_handle.emit("euv://reload", ()) {
-        log::warn!("[EUV] failed to emit reload event: {}", error);
+        ::log::warn!("[EUV] failed to emit reload event: {}", error);
     } else {
-        log::info!("[EUV] reload event emitted");
+        ::log::info!("[EUV] reload event emitted");
     }
 }
 
@@ -920,7 +923,7 @@ pub(crate) fn handle_euv_scheme(
     #[cfg(debug_assertions)]
     {
         let serve_path: String = file_path.to_string_lossy().into_owned();
-        euv_log!("[EUV] serving: {}", serve_path);
+        crate::euv_log!("[EUV] serving: {}", serve_path);
     }
     match std::fs::read(&file_path) {
         Ok(data) => {

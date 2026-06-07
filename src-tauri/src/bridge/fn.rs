@@ -9,13 +9,14 @@ use super::*;
 /// # Returns
 ///
 /// - `Result<Vec<String>, String>`: The list of permission strings, or an error if the group name is unknown.
-pub fn resolve_bridge_group_permissions(group: &str) -> Result<Vec<String>, String> {
+#[tauri::command]
+pub(crate) fn resolve_bridge_group_permissions(group: &str) -> Result<Vec<String>, String> {
     let bridge_group: BridgeGroup = group
         .parse::<BridgeGroup>()
         .map_err(|error: String| error)?;
     Ok(bridge_group
         .permissions()
         .iter()
-        .map(|s: &&str| (*s).to_string())
+        .map(|permission: &&str| permission.to_string())
         .collect())
 }
