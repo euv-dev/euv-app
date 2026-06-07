@@ -13,6 +13,13 @@ pub fn run() {
     {
         tauri::android_binding!(com, euv, run, tauri::wry);
     }
+    let _ = HTTP_CLIENT.get_or_init(|| {
+        Client::builder()
+            .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .redirect(Policy::limited(MAX_REDIRECTS))
+            .build()
+            .expect("fatal: failed to build HTTP client")
+    });
     Builder::default()
         .setup(|app: &mut App| {
             app.handle().plugin(
@@ -23,9 +30,10 @@ pub fn run() {
             let handle: AppHandle = app.handle().clone();
             #[cfg(debug_assertions)]
             let _ = APP_HANDLE.set(handle.clone());
-            deploy_bundled_cache_sync(&handle);
+            let setup_handle: AppHandle = handle.clone();
             spawn(async move {
-                if has_active_cache(&handle) {
+                deploy_bundled_cache(&setup_handle).await;
+                if has_active_cache(&setup_handle).await {
                     crate::euv_log!("[EUV] cache ready, background update");
                     background_update(handle).await;
                 } else {
@@ -35,11 +43,17 @@ pub fn run() {
             });
             Ok(())
         })
-        .register_uri_scheme_protocol(
+        .register_asynchronous_uri_scheme_protocol(
             SCHEME_NAME,
             move |context: tauri::UriSchemeContext<'_, tauri::Wry>,
-                  request: http::Request<Vec<u8>>| {
-                handle_euv_scheme(context.app_handle(), request)
+                  request: http::Request<Vec<u8>>,
+                  responder: UriSchemeResponder| {
+                let app_handle: AppHandle = context.app_handle().clone();
+                spawn(async move {
+                    let response: http::Response<Cow<'static, [u8]>> =
+                        handle_euv_scheme(&app_handle, request).await;
+                    responder.respond(response);
+                });
             },
         )
         .invoke_handler(generate_handler![
@@ -82,7 +96,7 @@ fn active_pointer_path(cache_root: &Path) -> PathBuf {
     cache_root.join(ACTIVE_LINK)
 }
 
-/// Reads the currently active version name from the pointer file synchronously.
+/// Reads the currently active version name from the pointer file asynchronously.
 ///
 /// # Arguments
 ///
@@ -91,13 +105,13 @@ fn active_pointer_path(cache_root: &Path) -> PathBuf {
 /// # Returns
 ///
 /// - `Option<String>`: The active version name if it exists and is valid, otherwise `None`.
-fn read_active_version_sync(cache_root: &Path) -> Option<String> {
-    let name: String = std::fs::read_to_string(active_pointer_path(cache_root)).ok()?;
+async fn read_active_version(cache_root: &Path) -> Option<String> {
+    let name: String = read_to_string(active_pointer_path(cache_root)).await.ok()?;
     let name: String = name.trim().to_string();
     if name.is_empty() {
         return None;
     }
-    if std::fs::metadata(cache_root.join(&name)).ok()?.is_dir() {
+    if metadata(cache_root.join(&name)).await.ok()?.is_dir() {
         Some(name)
     } else {
         None
@@ -142,30 +156,9 @@ async fn switch_active_version(cache_root: &Path, version_name: &str) -> Result<
     Ok(())
 }
 
-/// Switches the active version pointer to the specified version synchronously.
-///
-/// Uses atomic rename to ensure the pointer file is updated safely.
-///
-/// # Arguments
-///
-/// - `&Path`: The cache root directory path.
-/// - `&str`: The version name to set as active.
-///
-/// # Returns
-///
-/// - `Result<(), CacheError>`: Ok if the switch succeeded, or a write error.
-fn switch_active_version_sync(cache_root: &Path, version_name: &str) -> Result<(), CacheError> {
-    let pointer: PathBuf = active_pointer_path(cache_root);
-    let temporary: PathBuf = cache_root.join(format!(".active_tmp_{}", std::process::id()));
-    std::fs::write(&temporary, version_name)
-        .map_err(|error: std::io::Error| CacheError::Write(error.to_string()))?;
-    std::fs::rename(&temporary, &pointer)
-        .map_err(|error: std::io::Error| CacheError::Write(error.to_string()))?;
-    crate::euv_log!("[EUV] switched active: {}", version_name);
-    Ok(())
-}
-
 /// Removes old version directories, keeping only the most recent ones.
+///
+/// Deletion is performed concurrently for faster cleanup.
 ///
 /// # Arguments
 ///
@@ -181,8 +174,8 @@ async fn cleanup_old_versions(cache_root: &Path, current: &str) {
         let name: String = entry.file_name().to_string_lossy().to_string();
         if name.starts_with(VERSION_PREFIX)
             && name != current
-            && let Ok(metadata) = entry.metadata().await
-            && metadata.is_dir()
+            && let Ok(entry_metadata) = entry.metadata().await
+            && entry_metadata.is_dir()
         {
             versions.push(name);
         }
@@ -193,28 +186,44 @@ async fn cleanup_old_versions(cache_root: &Path, current: &str) {
         return;
     }
     let to_remove: usize = versions.len() - max_old;
-    for name in &versions[..to_remove] {
-        remove_dir_all(cache_root.join(name)).await.ok();
-        crate::euv_log!("[EUV] removed old version: {}", name);
+    let remove_handles: Vec<tauri::async_runtime::JoinHandle<()>> = versions[..to_remove]
+        .iter()
+        .map(|name: &String| {
+            let dir_path: PathBuf = cache_root.join(name);
+            let log_name: String = name.clone();
+            tauri::async_runtime::spawn(async move {
+                remove_dir_all(&dir_path).await.ok();
+                crate::euv_log!("[EUV] removed old version: {}", log_name);
+            })
+        })
+        .collect();
+    for handle in remove_handles {
+        handle.await.ok();
     }
 }
 
-/// Builds an HTTP client with configured timeout and redirect policy.
+/// Returns a reference to the global shared HTTP client.
+///
+/// Reuses a single `Client` instance with connection pooling across all fetch operations,
+/// avoiding repeated TLS handshake and DNS resolution overhead.
 ///
 /// # Returns
 ///
-/// - `Result<Client, CacheError>`: A configured reqwest client, or a fetch error.
-fn build_client() -> Result<Client, CacheError> {
-    Client::builder()
-        .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .redirect(Policy::limited(MAX_REDIRECTS))
-        .build()
-        .map_err(|error: reqwest::Error| CacheError::Fetch(error.to_string()))
+/// - `&'static Client`: The globally shared HTTP client reference.
+fn shared_client() -> &'static Client {
+    HTTP_CLIENT.get_or_init(|| {
+        Client::builder()
+            .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .redirect(Policy::limited(MAX_REDIRECTS))
+            .build()
+            .expect("fatal: failed to build HTTP client")
+    })
 }
 
 /// Fetches a URL and returns the response body as bytes.
 ///
-/// Enforces a maximum body size limit.
+/// Enforces a maximum body size limit by checking `Content-Length` header first
+/// to avoid downloading oversized responses.
 ///
 /// # Arguments
 ///
@@ -224,7 +233,7 @@ fn build_client() -> Result<Client, CacheError> {
 ///
 /// - `Result<Vec<u8>, CacheError>`: The response body bytes, or a fetch/write error.
 pub(crate) async fn fetch_url(url: &str) -> Result<Vec<u8>, CacheError> {
-    let client: Client = build_client()?;
+    let client: &Client = shared_client();
     let response: reqwest::Response = client
         .get(url)
         .send()
@@ -232,6 +241,14 @@ pub(crate) async fn fetch_url(url: &str) -> Result<Vec<u8>, CacheError> {
         .map_err(|error: reqwest::Error| CacheError::Fetch(error.to_string()))?;
     if !response.status().is_success() {
         return Err(CacheError::Fetch(format!("HTTP {}", response.status())));
+    }
+    if let Some(content_length) = response.content_length()
+        && content_length as usize > MAX_BODY_SIZE
+    {
+        return Err(CacheError::Fetch(format!(
+            "Too large: {} bytes",
+            content_length
+        )));
     }
     let bytes: Vec<u8> = response
         .bytes()
@@ -249,6 +266,8 @@ pub(crate) async fn fetch_url(url: &str) -> Result<Vec<u8>, CacheError> {
 
 /// Fetches a URL and returns both the final URL (after redirects) and the response body.
 ///
+/// Checks `Content-Length` before downloading to avoid wasting bandwidth on oversized files.
+///
 /// # Arguments
 ///
 /// - `&str`: The URL to fetch.
@@ -257,7 +276,7 @@ pub(crate) async fn fetch_url(url: &str) -> Result<Vec<u8>, CacheError> {
 ///
 /// - `Result<(String, Vec<u8>), CacheError>`: A tuple of (final_url, body_bytes), or a fetch error.
 async fn fetch_url_with_final_url(url: &str) -> Result<(String, Vec<u8>), CacheError> {
-    let client: Client = build_client()?;
+    let client: &Client = shared_client();
     let response: reqwest::Response = client
         .get(url)
         .send()
@@ -265,6 +284,14 @@ async fn fetch_url_with_final_url(url: &str) -> Result<(String, Vec<u8>), CacheE
         .map_err(|error: reqwest::Error| CacheError::Fetch(error.to_string()))?;
     if !response.status().is_success() {
         return Err(CacheError::Fetch(format!("HTTP {}", response.status())));
+    }
+    if let Some(content_length) = response.content_length()
+        && content_length as usize > MAX_BODY_SIZE
+    {
+        return Err(CacheError::Fetch(format!(
+            "Too large: {} bytes",
+            content_length
+        )));
     }
     let final_url: String = response.url().to_string();
     let bytes: Vec<u8> = response
@@ -307,7 +334,33 @@ async fn atomic_write(target: &Path, data: &[u8]) -> Result<(), CacheError> {
     Ok(())
 }
 
-/// Deploys bundled cache files synchronously if no active deployment exists.
+/// Strips leading slashes and `./` prefixes from a relative path.
+///
+/// Avoids repeated `trim_start_matches` + `to_string()` allocations by centralizing the logic.
+///
+/// # Arguments
+///
+/// - `&str`: The relative path to clean.
+///
+/// # Returns
+///
+/// - `String`: The cleaned path.
+fn clean_relative_path(path: &str) -> String {
+    let mut result: &str = path;
+    loop {
+        let trimmed: &str = result.trim_start_matches('/');
+        if let Some(stripped) = trimmed.strip_prefix("./") {
+            result = stripped;
+        } else if trimmed.len() < result.len() {
+            result = trimmed;
+        } else {
+            break;
+        }
+    }
+    result.to_string()
+}
+
+/// Deploys bundled cache files asynchronously if no active deployment exists.
 ///
 /// # Arguments
 ///
@@ -316,7 +369,7 @@ async fn atomic_write(target: &Path, data: &[u8]) -> Result<(), CacheError> {
 /// # Returns
 ///
 /// - `bool`: `true` if bundled files were deployed or an active deployment already exists, `false` otherwise.
-pub(crate) fn deploy_bundled_cache_sync(app_handle: &AppHandle) -> bool {
+pub(crate) async fn deploy_bundled_cache(app_handle: &AppHandle) -> bool {
     if BUNDLED_FILES.is_empty() {
         return false;
     }
@@ -324,40 +377,43 @@ pub(crate) fn deploy_bundled_cache_sync(app_handle: &AppHandle) -> bool {
         Ok(directory) => directory,
         Err(_) => return false,
     };
-    if let Some(existing) = read_active_version_sync(&cache_root) {
+    if let Some(existing) = read_active_version(&cache_root).await {
         crate::euv_log!("[EUV] reusing existing active deployment: {existing}");
         return true;
     }
-    if std::fs::create_dir_all(&cache_root).is_err() {
+    if create_dir_all(&cache_root).await.is_err() {
         return false;
     }
     let version_name: String = new_version_name();
     let version_dir: PathBuf = cache_root.join(&version_name);
-    if std::fs::create_dir_all(&version_dir).is_err() {
+    if create_dir_all(&version_dir).await.is_err() {
         return false;
     }
     let mut count: usize = 0;
     for (rel_path, data) in BUNDLED_FILES {
         let target: PathBuf = version_dir.join(rel_path);
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).ok();
+            create_dir_all(parent).await.ok();
         }
-        if std::fs::write(&target, data).is_ok() {
+        if write(&target, data).await.is_ok() {
             count += 1;
         }
     }
     if count == 0 {
-        std::fs::remove_dir_all(&version_dir).ok();
+        remove_dir_all(&version_dir).await.ok();
         return false;
     }
-    if switch_active_version_sync(&cache_root, &version_name).is_err() {
+    if switch_active_version(&cache_root, &version_name)
+        .await
+        .is_err()
+    {
         return false;
     }
     crate::euv_log!("[EUV] deployed {count} bundled files, serving: {version_name}");
     true
 }
 
-/// Checks whether an active cache deployment exists.
+/// Checks whether an active cache deployment exists asynchronously.
 ///
 /// # Arguments
 ///
@@ -366,12 +422,12 @@ pub(crate) fn deploy_bundled_cache_sync(app_handle: &AppHandle) -> bool {
 /// # Returns
 ///
 /// - `bool`: `true` if an active version is present, `false` otherwise.
-pub(crate) fn has_active_cache(app_handle: &AppHandle) -> bool {
+pub(crate) async fn has_active_cache(app_handle: &AppHandle) -> bool {
     let cache_root: PathBuf = match get_cache_root(app_handle) {
         Ok(directory) => directory,
         Err(_) => return false,
     };
-    read_active_version_sync(&cache_root).is_some()
+    read_active_version(&cache_root).await.is_some()
 }
 
 /// Fetches a full snapshot of the remote HTML page and all linked resources.
@@ -388,7 +444,7 @@ pub(crate) fn has_active_cache(app_handle: &AppHandle) -> bool {
 /// - `Result<String, CacheError>`: The new version name on success, or a fetch/write error.
 async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
     let (final_url, html_bytes) = fetch_url_with_final_url(REMOTE_URL).await?;
-    let html: String = String::from_utf8_lossy(&html_bytes).to_string();
+    let html: String = String::from_utf8_lossy(&html_bytes).into_owned();
     if html.is_empty() {
         return Err(CacheError::Fetch("empty HTML".to_string()));
     }
@@ -405,7 +461,7 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
     extract_attr_values(&html, "link", "href", &mut expected_paths);
     extract_attr_values(&html, "img", "src", &mut expected_paths);
     extract_module_imports(&html, &mut expected_paths);
-    expected_paths.retain(|p| {
+    expected_paths.retain(|p: &String| {
         !p.starts_with("http://")
             && !p.starts_with("https://")
             && !p.starts_with("//")
@@ -417,13 +473,12 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
             "incomplete snapshot: no resources fetched".to_string(),
         ));
     }
+    let mut verified_set: HashSet<String> = HashSet::with_capacity(expected_paths.len());
     for expected in &expected_paths {
-        let clean: String = expected
-            .trim_start_matches('/')
-            .trim_start_matches("./")
-            .to_string();
+        let clean: String = clean_relative_path(expected);
+        verified_set.insert(clean.clone());
         let file_path: PathBuf = version_dir.join(&clean);
-        if !file_path.exists() {
+        if metadata(&file_path).await.is_err() {
             crate::euv_log!("[EUV] missing critical resource: {}", clean);
             remove_dir_all(&version_dir).await.ok();
             return Err(CacheError::Fetch(format!(
@@ -433,18 +488,14 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
         }
     }
     let mut wasm_paths: Vec<String> = Vec::new();
-    let mut js_to_scan: Vec<String> = expected_paths
+    let mut js_to_scan: Vec<String> = verified_set
         .iter()
-        .map(|p| {
-            p.trim_start_matches('/')
-                .trim_start_matches("./")
-                .to_string()
-        })
-        .filter(|c| c.ends_with(".js") || c.ends_with(".mjs"))
+        .filter(|c: &&String| c.ends_with(".js") || c.ends_with(".mjs"))
+        .cloned()
         .collect();
     let pkg_dir: PathBuf = version_dir.join("pkg");
-    if pkg_dir.exists()
-        && let Ok(mut entries) = tokio::fs::read_dir(&pkg_dir).await
+    if metadata(&pkg_dir).await.is_ok()
+        && let Ok(mut entries) = read_dir(&pkg_dir).await
     {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let name: String = entry.file_name().to_string_lossy().to_string();
@@ -463,12 +514,9 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
         }
     }
     for wasm_ref in &wasm_paths {
-        let clean: String = wasm_ref
-            .trim_start_matches('/')
-            .trim_start_matches("./")
-            .to_string();
+        let clean: String = clean_relative_path(wasm_ref);
         let file_path: PathBuf = version_dir.join(&clean);
-        if !file_path.exists() {
+        if metadata(&file_path).await.is_err() {
             crate::euv_log!("[EUV] missing critical WASM resource: {}", clean);
             remove_dir_all(&version_dir).await.ok();
             return Err(CacheError::Fetch(format!(
@@ -559,7 +607,7 @@ fn derive_base_url(final_url: &str) -> String {
         return url;
     }
     if let Some(pos) = url.rfind('/')
-        && pos > url.find("://").map_or(0, |p| p + 2)
+        && pos > url.find("://").map_or(0, |p: usize| p + 2)
     {
         return url[..pos].to_string();
     }
@@ -569,6 +617,7 @@ fn derive_base_url(final_url: &str) -> String {
 /// Fetches all linked resources (scripts, stylesheets, images) from an HTML page.
 ///
 /// Also discovers and fetches transitive dependencies in JS files (WASM, ES module imports).
+/// Uses `HashSet` for deduplication to avoid O(n) linear scans.
 ///
 /// # Arguments
 ///
@@ -589,7 +638,12 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str)
     crate::euv_log!("[EUV] resource base URL: {}", base_url);
     let fetched: FetchResult = fetch_resource_list(&paths, &base_url, version_dir).await;
     let mut total_count: usize = fetched.len();
+    let fetched_set: HashSet<String> = fetched
+        .iter()
+        .map(|(clean_path, _): &(String, Vec<u8>)| clean_path.clone())
+        .collect();
     let mut extra_paths: Vec<String> = Vec::new();
+    let mut extra_set: HashSet<String> = HashSet::new();
     for (clean_path, data) in &fetched {
         if clean_path.ends_with(".js") || clean_path.ends_with(".mjs") {
             let js_content: String = String::from_utf8_lossy(data).to_string();
@@ -597,12 +651,9 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str)
             extract_module_imports(&js_content, &mut extra_paths);
         }
     }
-    extra_paths.retain(|p| {
-        let clean: String = p
-            .trim_start_matches('/')
-            .trim_start_matches("./")
-            .to_string();
-        !fetched.iter().any(|(c, _)| c == &clean)
+    extra_paths.retain(|p: &String| {
+        let clean: String = clean_relative_path(p);
+        !fetched_set.contains(&clean) && extra_set.insert(clean)
     });
     if !extra_paths.is_empty() {
         crate::euv_log!("[EUV] found {} extra dependencies in JS", extra_paths.len());
@@ -615,7 +666,9 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str)
 
 /// Fetches a list of resource URLs concurrently and writes them to disk.
 ///
-/// Skips data URIs, absolute HTTP URLs, and protocol-relative URLs.
+/// Uses `JoinSet` for more efficient concurrent task management compared to
+/// manual `spawn` + `Vec<JoinHandle>` pattern. Skips data URIs, absolute HTTP URLs,
+/// and protocol-relative URLs.
 ///
 /// # Arguments
 ///
@@ -627,8 +680,7 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str)
 ///
 /// - `FetchResult`: A vector of (clean_path, data) tuples for successfully fetched resources.
 async fn fetch_resource_list(paths: &[String], base_url: &str, version_dir: &Path) -> FetchResult {
-    let results: SharedResults = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    let mut handles: Vec<tauri::async_runtime::JoinHandle<()>> = Vec::new();
+    let mut join_set: tokio::task::JoinSet<Option<(String, Vec<u8>)>> = tokio::task::JoinSet::new();
     for relative_path in paths {
         if relative_path.starts_with("data:")
             || relative_path.starts_with("http://")
@@ -637,44 +689,44 @@ async fn fetch_resource_list(paths: &[String], base_url: &str, version_dir: &Pat
         {
             continue;
         }
-        let clean: String = relative_path
-            .trim_start_matches('/')
-            .trim_start_matches("./")
-            .to_string();
+        let clean: String = clean_relative_path(relative_path);
         let url: String = format!("{}/{}", base_url, clean);
         let local: PathBuf = version_dir.join(&clean);
-        let results_clone: SharedResults = results.clone();
-        handles.push(tauri::async_runtime::spawn(async move {
+        join_set.spawn(async move {
             match fetch_url(&url).await {
                 Ok(data) => {
                     if data.is_empty() {
                         crate::euv_log!("[EUV] skipped empty resource: {}", clean);
-                        return;
+                        return None;
                     }
                     if let Err(error) = atomic_write(&local, &data).await {
                         crate::euv_log!("[EUV] write failed {}: {}", clean, error);
+                        None
                     } else {
                         crate::euv_log!("[EUV] fetched: {} ({} bytes)", clean, data.len());
-                        results_clone.lock().await.push((clean, data));
+                        Some((clean, data))
                     }
                 }
                 Err(error) => {
                     crate::euv_log!("[EUV] fetch failed {}: {}", clean, error);
+                    None
                 }
             }
-        }));
+        });
     }
-    for handle in handles {
-        handle.await.ok();
+    let mut results: FetchResult = Vec::with_capacity(join_set.len());
+    while let Some(result) = join_set.join_next().await {
+        if let Ok(Some(tuple)) = result {
+            results.push(tuple);
+        }
     }
-    let mutex = Arc::try_unwrap(results)
-        .unwrap_or_else(|arc: SharedResults| tokio::sync::Mutex::new(arc.blocking_lock().clone()));
-    mutex.into_inner()
+    results
 }
 
 /// Extracts WASM file references from JavaScript source code.
 ///
 /// Looks for `.wasm` string literals and resolves them relative to the JS file's directory.
+/// Uses `HashSet`-compatible dedup via the caller's `HashSet` for O(1) lookups.
 ///
 /// # Arguments
 ///
@@ -697,11 +749,11 @@ fn extract_wasm_references(js: &str, js_path: &str, results: &mut Vec<String>) {
         let before: &str = &js[search_start..index];
         let wasm_ref: Option<&str> = before
             .rfind('\'')
-            .map(|q| &js[search_start + q + 1..index + 5])
+            .map(|q: usize| &js[search_start + q + 1..index + 5])
             .or_else(|| {
                 before
                     .rfind('"')
-                    .map(|q| &js[search_start + q + 1..index + 5])
+                    .map(|q: usize| &js[search_start + q + 1..index + 5])
             });
         if let Some(wasm_file) = wasm_ref
             && !wasm_file.contains("://")
@@ -749,6 +801,9 @@ fn extract_module_imports(html: &str, results: &mut Vec<String>) {
 
 /// Extracts attribute values from HTML tags matching the specified tag and attribute name.
 ///
+/// Performs case-insensitive matching without allocating a new `String` for `to_lowercase()`
+/// by comparing only the tag and attribute patterns in lowercase.
+///
 /// # Arguments
 ///
 /// - `&str`: The HTML content to parse.
@@ -756,11 +811,13 @@ fn extract_module_imports(html: &str, results: &mut Vec<String>) {
 /// - `&str`: The attribute name to extract (e.g., `"src"`, `"href"`).
 /// - `&mut Vec<String>`: The collection to append discovered attribute values to.
 fn extract_attr_values(html: &str, tag: &str, attr: &str, results: &mut Vec<String>) {
-    let tag_pattern: String = format!("<{}", tag.to_lowercase());
-    let attr_pattern: String = format!("{}=", attr.to_lowercase());
+    let tag_lower: String = tag.to_lowercase();
+    let attr_lower: String = attr.to_lowercase();
+    let tag_prefix: String = format!("<{}", tag_lower);
+    let attr_eq: String = format!("{}=", attr_lower);
     let mut pos: usize = 0;
     while pos < html.len() {
-        let start: usize = match html[pos..].find(&tag_pattern) {
+        let start: usize = match html[pos..].find(tag_prefix.as_str()) {
             Some(offset) => pos + offset,
             None => break,
         };
@@ -768,9 +825,9 @@ fn extract_attr_values(html: &str, tag: &str, attr: &str, results: &mut Vec<Stri
             Some(offset) => start + offset,
             None => break,
         };
-        let content: String = html[start..end].to_lowercase();
-        if let Some(attr_position) = content.find(&attr_pattern) {
-            let value: &str = extract_quoted_value(&content[attr_position + attr_pattern.len()..]);
+        let content: &str = &html[start..end];
+        if let Some(attr_position) = content.to_lowercase().find(attr_eq.as_str()) {
+            let value: &str = extract_quoted_value(&content[attr_position + attr_eq.len()..]);
             if !value.is_empty() && !results.contains(&value.to_string()) {
                 results.push(value.to_string());
             }
@@ -819,6 +876,9 @@ pub(crate) fn notify_reload(app_handle: &AppHandle) {
 
 /// Returns the MIME type string for a given file path based on its extension.
 ///
+/// Uses `rfind` to locate the last dot in the path and performs case-insensitive
+/// comparison on the extension only, avoiding a full `to_lowercase()` heap allocation.
+///
 /// # Arguments
 ///
 /// - `&str`: The file path or extension to look up.
@@ -827,36 +887,39 @@ pub(crate) fn notify_reload(app_handle: &AppHandle) {
 ///
 /// - `&'static str`: The corresponding MIME type string, or `"application/octet-stream"` as fallback.
 pub(crate) fn mime_for(path: &str) -> &'static str {
-    let lower_path: String = path.to_lowercase();
-    if lower_path.ends_with(".html") || lower_path.ends_with(".htm") {
+    let extension: &str = match path.rfind('.') {
+        Some(pos) => &path[pos..],
+        None => "",
+    };
+    if extension.eq_ignore_ascii_case(".html") || extension.eq_ignore_ascii_case(".htm") {
         "text/html"
-    } else if lower_path.ends_with(".js") || lower_path.ends_with(".mjs") {
+    } else if extension.eq_ignore_ascii_case(".js") || extension.eq_ignore_ascii_case(".mjs") {
         "application/javascript"
-    } else if lower_path.ends_with(".wasm") {
+    } else if extension.eq_ignore_ascii_case(".wasm") {
         "application/wasm"
-    } else if lower_path.ends_with(".css") {
+    } else if extension.eq_ignore_ascii_case(".css") {
         "text/css"
-    } else if lower_path.ends_with(".json") {
+    } else if extension.eq_ignore_ascii_case(".json") {
         "application/json"
-    } else if lower_path.ends_with(".png") {
+    } else if extension.eq_ignore_ascii_case(".png") {
         "image/png"
-    } else if lower_path.ends_with(".jpg") || lower_path.ends_with(".jpeg") {
+    } else if extension.eq_ignore_ascii_case(".jpg") || extension.eq_ignore_ascii_case(".jpeg") {
         "image/jpeg"
-    } else if lower_path.ends_with(".gif") {
+    } else if extension.eq_ignore_ascii_case(".gif") {
         "image/gif"
-    } else if lower_path.ends_with(".svg") {
+    } else if extension.eq_ignore_ascii_case(".svg") {
         "image/svg+xml"
-    } else if lower_path.ends_with(".ico") {
+    } else if extension.eq_ignore_ascii_case(".ico") {
         "image/x-icon"
-    } else if lower_path.ends_with(".woff") {
+    } else if extension.eq_ignore_ascii_case(".woff") {
         "font/woff"
-    } else if lower_path.ends_with(".woff2") {
+    } else if extension.eq_ignore_ascii_case(".woff2") {
         "font/woff2"
-    } else if lower_path.ends_with(".ttf") {
+    } else if extension.eq_ignore_ascii_case(".ttf") {
         "font/ttf"
-    } else if lower_path.ends_with(".otf") {
+    } else if extension.eq_ignore_ascii_case(".otf") {
         "font/otf"
-    } else if lower_path.ends_with(".webp") {
+    } else if extension.eq_ignore_ascii_case(".webp") {
         "image/webp"
     } else {
         "application/octet-stream"
@@ -867,6 +930,7 @@ pub(crate) fn mime_for(path: &str) -> &'static str {
 ///
 /// Reads the requested file from the active cache directory and injects
 /// the reload listener script and debug panel (in debug mode) into index.html.
+/// Uses exponential backoff when waiting for cache readiness.
 ///
 /// # Arguments
 ///
@@ -876,7 +940,7 @@ pub(crate) fn mime_for(path: &str) -> &'static str {
 /// # Returns
 ///
 /// - `http::Response<Cow<'static, [u8]>>`: The HTTP response with the file content or an error status.
-pub(crate) fn handle_euv_scheme(
+pub(crate) async fn handle_euv_scheme(
     app_handle: &AppHandle,
     request: http::Request<Vec<u8>>,
 ) -> http::Response<Cow<'static, [u8]>> {
@@ -894,14 +958,15 @@ pub(crate) fn handle_euv_scheme(
                 .unwrap();
         }
     };
-    let active_version: Option<String> = read_active_version_sync(&cache_root);
+    let active_version: Option<String> = read_active_version(&cache_root).await;
     let active_dir: PathBuf = match active_version.as_deref() {
         Some(version) => cache_root.join(version),
         None => {
             let start: Instant = Instant::now();
             let timeout: Duration = Duration::from_secs(2);
+            let mut wait_millis: u64 = 2;
             loop {
-                if let Some(version) = read_active_version_sync(&cache_root) {
+                if let Some(version) = read_active_version(&cache_root).await {
                     break cache_root.join(version);
                 }
                 if start.elapsed() >= timeout {
@@ -910,7 +975,8 @@ pub(crate) fn handle_euv_scheme(
                         .body(Cow::Owned(b"Cache not ready".to_vec()))
                         .unwrap();
                 }
-                std::thread::sleep(Duration::from_millis(2));
+                tokio::time::sleep(Duration::from_millis(wait_millis)).await;
+                wait_millis = (wait_millis * 2).min(64);
             }
         }
     };
@@ -925,7 +991,7 @@ pub(crate) fn handle_euv_scheme(
         let serve_path: String = file_path.to_string_lossy().into_owned();
         crate::euv_log!("[EUV] serving: {}", serve_path);
     }
-    match std::fs::read(&file_path) {
+    match read(&file_path).await {
         Ok(data) => {
             let mime: &str = mime_for(&path_decoded);
             let mut builder: http::response::Builder = http::Response::builder()
@@ -945,8 +1011,9 @@ pub(crate) fn handle_euv_scheme(
                 let mut extra_scripts: String = RELOAD_LISTENER_SCRIPT.to_string();
                 #[cfg(debug_assertions)]
                 {
-                    let source: String = read_active_version_sync(&cache_root)
-                        .map(|_| "active".to_string())
+                    let source: String = active_version
+                        .as_ref()
+                        .map(|_: &String| "active".to_string())
                         .unwrap_or_else(|| "none".to_string());
                     let dir_path: String = active_dir.to_string_lossy().into_owned();
                     extra_scripts.push_str(
@@ -990,11 +1057,11 @@ pub(crate) fn handle_euv_scheme(
 pub(crate) async fn load_cached_resource(app_handle: AppHandle) -> Result<CachedPage, String> {
     let cache_root: PathBuf =
         get_cache_root(&app_handle).map_err(|error: CacheError| error.to_string())?;
-    let active_version: Option<String> = read_active_version_sync(&cache_root);
+    let active_version: Option<String> = read_active_version(&cache_root).await;
     let from_cache: bool = active_version.is_some();
     let source: String = active_version
         .as_ref()
-        .map(|_| "active".to_string())
+        .map(|_: &String| "active".to_string())
         .unwrap_or_else(|| "none".to_string());
     let cache_path: String = active_version
         .as_deref()

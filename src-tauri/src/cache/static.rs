@@ -1,4 +1,3 @@
-#[cfg(debug_assertions)]
 use super::*;
 
 /// A global handle to the Tauri `AppHandle`, available only in debug builds.
@@ -6,3 +5,9 @@ use super::*;
 /// Used by the `euv_log!` macro to emit debug log events to the frontend debug panel.
 #[cfg(debug_assertions)]
 pub(crate) static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+
+/// A lazily-initialized global HTTP client that reuses connection pools across all fetch operations.
+///
+/// Avoids the overhead of creating a new `Client` instance per request, which would
+/// re-establish TLS sessions and DNS resolutions each time.
+pub(crate) static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
