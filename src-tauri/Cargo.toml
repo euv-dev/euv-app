@@ -13,19 +13,34 @@ tauri-build = { version = "2.6.2", features = [] }
 serde_json = "1"
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-log = "0.4"
+log = "0.4.32"
+http = "1.4.1"
+percent-encoding = "2.3.2"
+tauri-plugin-log = "2.8.0"
 tauri = { version = "2.11.2", features = [] }
-tauri-plugin-log = "2"
-reqwest = { version = "0.12", features = [
-    "rustls-tls-webpki-roots",
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.52.3", features = ["time", "fs"] }
+reqwest = { version = "0.13.4", features = [
+    "rustls",
     "gzip",
     "brotli",
     "deflate",
 ], default-features = false }
-tokio = { version = "1", features = ["time", "fs"] }
-http = "1"
-percent-encoding = "2"
+
+[profile.dev]
+incremental = false
+opt-level = 3
+lto = true
+panic = "unwind"
+debug = false
+codegen-units = 1
+strip = "debuginfo"
 
 [profile.release]
 incremental = false
+opt-level = 3
+lto = true
+panic = "unwind"
+debug = false
+codegen-units = 1
+strip = "debuginfo"
