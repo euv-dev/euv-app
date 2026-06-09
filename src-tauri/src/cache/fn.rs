@@ -578,10 +578,8 @@ pub(crate) async fn background_update(app_handle: AppHandle) {
     loop {
         match fetch_full_snapshot(&cache_root).await {
             Ok(version) => {
-                crate::euv_log!(
-                    "[EUV] background update done: {}, will take effect on next launch",
-                    version
-                );
+                crate::euv_log!("[EUV] background update done: {}", version);
+                notify_reload(&app_handle);
                 return;
             }
             Err(error) => {
