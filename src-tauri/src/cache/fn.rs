@@ -20,7 +20,6 @@ pub fn run() {
             .build()
             .expect("fatal: failed to build HTTP client")
     });
-    let _ = UPDATE_READY.get_or_init(|| tokio::sync::watch::channel(false));
     Builder::default()
         .setup(|app: &mut App| {
             app.handle().plugin(
@@ -544,17 +543,13 @@ pub(crate) async fn initial_fetch(app_handle: AppHandle) {
     crate::euv_log!("[EUV] initial fetch started");
     let cache_root: PathBuf = match get_cache_root(&app_handle) {
         Ok(directory) => directory,
-        Err(_) => {
-            signal_update_ready();
-            return;
-        }
+        Err(_) => return,
     };
     create_dir_all(&cache_root).await.ok();
     loop {
         match fetch_full_snapshot(&cache_root).await {
             Ok(version) => {
                 crate::euv_log!("[EUV] initial fetch done: {}", version);
-                signal_update_ready();
                 notify_reload(&app_handle);
                 return;
             }
@@ -577,17 +572,13 @@ pub(crate) async fn background_update(app_handle: AppHandle) {
     crate::euv_log!("[EUV] background update started");
     let cache_root: PathBuf = match get_cache_root(&app_handle) {
         Ok(directory) => directory,
-        Err(_) => {
-            signal_update_ready();
-            return;
-        }
+        Err(_) => return,
     };
     create_dir_all(&cache_root).await.ok();
     loop {
         match fetch_full_snapshot(&cache_root).await {
             Ok(version) => {
                 crate::euv_log!("[EUV] background update done: {}", version);
-                signal_update_ready();
                 notify_reload(&app_handle);
                 return;
             }
@@ -867,32 +858,6 @@ fn extract_quoted_value(input: &str) -> &str {
     ""
 }
 
-/// Signals that the background update (or initial fetch) has completed.
-///
-/// Wakes any scheme handler waiting for the latest version.
-fn signal_update_ready() {
-    if let Some((sender, _)) = UPDATE_READY.get() {
-        let _ = sender.send(true);
-    }
-}
-
-/// Waits until the background update has completed, with a timeout.
-///
-/// Returns immediately if the update has already been signalled.
-///
-/// # Arguments
-///
-/// - `Duration`: Maximum time to wait before falling back to the current active version.
-async fn wait_for_update(timeout: Duration) {
-    if let Some((_, receiver)) = UPDATE_READY.get() {
-        let mut rx: tokio::sync::watch::Receiver<bool> = receiver.clone();
-        if *rx.borrow() {
-            return;
-        }
-        let _ = tokio::time::timeout(timeout, rx.changed()).await;
-    }
-}
-
 /// Emits a reload event to the frontend via Tauri.
 ///
 /// # Arguments
@@ -983,11 +948,6 @@ pub(crate) async fn handle_euv_scheme(
         .decode_utf8_lossy()
         .into_owned();
     let is_index: bool = path_decoded.is_empty() || path_decoded == "index.html";
-    // Wait for background update to finish before serving the first index.html,
-    // so the WebView always loads the latest remote resources on cold start.
-    if is_index {
-        wait_for_update(Duration::from_secs(FETCH_TIMEOUT_SECS)).await;
-    }
     let cache_root: PathBuf = match get_cache_root(app_handle) {
         Ok(directory) => directory,
         Err(_) => {
