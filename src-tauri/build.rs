@@ -20,10 +20,8 @@ fn walk_dir(directory: &Path, base: &Path, results: &mut Vec<PathBuf>) {
 
 fn main() {
     tauri_build::build();
-
     let manifest_dir: PathBuf = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir: PathBuf = PathBuf::from(env::var("OUT_DIR").unwrap());
-
     let config_path: PathBuf = manifest_dir.parent().unwrap().join("app.config.json");
     println!("cargo:rerun-if-changed={}", config_path.display());
     let config_content: String =
@@ -39,7 +37,6 @@ fn main() {
     );
     fs::write(out_dir.join("config_generated.rs"), &config_code)
         .expect("Failed to write config_generated.rs");
-
     let bundled_cache_dir: PathBuf = manifest_dir.join("bundled-cache");
     let generated_file: PathBuf = out_dir.join("bundled_cache_data.rs");
     if bundled_cache_dir.exists() && bundled_cache_dir.is_dir() {

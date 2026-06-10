@@ -826,7 +826,12 @@ async fn fetch_absolute_list(deps: &[(String, String)], version_dir: &Path) -> u
                         euv_log!("[EUV] write failed {}: {}", clean, error);
                         false
                     } else {
-                        euv_log!("[EUV] fetched dep: {} ({} bytes) from {}", clean, data.len(), url);
+                        euv_log!(
+                            "[EUV] fetched dep: {} ({} bytes) from {}",
+                            clean,
+                            data.len(),
+                            url
+                        );
                         true
                     }
                 }
@@ -890,7 +895,12 @@ async fn fetch_resource_list(paths: &[String], base_url: &str, version_dir: &Pat
                         None
                     } else {
                         if final_url != url {
-                            euv_log!("[EUV] fetched: {} ({} bytes) [redirected -> {}]", clean, data.len(), final_url);
+                            euv_log!(
+                                "[EUV] fetched: {} ({} bytes) [redirected -> {}]",
+                                clean,
+                                data.len(),
+                                final_url
+                            );
                         } else {
                             euv_log!("[EUV] fetched: {} ({} bytes)", clean, data.len());
                         }
