@@ -579,7 +579,10 @@ pub(crate) async fn initial_fetch(app_handle: AppHandle) {
             Ok(version) => {
                 // Do NOT reload the current session. The freshly committed
                 // active pointer takes effect on the NEXT launch only.
-                euv_log!("[EUV] initial fetch done (effective next launch): {}", version);
+                euv_log!(
+                    "[EUV] initial fetch done (effective next launch): {}",
+                    version
+                );
                 return;
             }
             Err(error) => {
@@ -609,7 +612,10 @@ pub(crate) async fn background_update(app_handle: AppHandle) {
             Ok(version) => {
                 // Do NOT reload the current session. The freshly committed
                 // active pointer takes effect on the NEXT launch only.
-                euv_log!("[EUV] background update done (effective next launch): {}", version);
+                euv_log!(
+                    "[EUV] background update done (effective next launch): {}",
+                    version
+                );
                 return;
             }
             Err(error) => {
