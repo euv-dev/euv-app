@@ -1,5 +1,124 @@
 use super::*;
 
+/// JavaScript injected into **every** webview on each page load to intercept any
+/// attempt to open an external link and route it to the system's default
+/// browser instead of navigating in-app.
+///
+/// Because it is injected from [`Builder::on_page_load`] — an application-level
+/// hook that fires for every webview the app owns on every page load — it also
+/// covers webviews created dynamically at runtime, after the app has started.
+///
+/// The script is idempotent (guarded by `__euvLinkGuard`) and intercepts:
+/// - clicks on `<a href>` (including `target="_blank"`),
+/// - `window.open(...)` calls,
+/// - programmatic assignments to `window.location` / `location.href`.
+///
+/// Internal targets (the app's own `euv://` scheme, the Tauri/wry runtime
+/// origins on `*.localhost`, relative URLs, and `about:`/`data:`/`blob:`/
+/// `javascript:` URLs) are left untouched so in-app navigation keeps working.
+/// Any genuine external `http(s)`/`mailto:`/`tel:`/… target is handed to the
+/// `plugin:opener|open_url` command, which opens it in the system browser.
+const LINK_INTERCEPTOR_SCRIPT: &str = r#"
+(function () {
+  if (window.__euvLinkGuard) { return; }
+  window.__euvLinkGuard = true;
+
+  function isInternal(href) {
+    if (!href) { return true; }
+    var s = String(href).trim();
+    if (s === '' || s.charAt(0) === '#') { return true; }
+    var lower = s.toLowerCase();
+    if (lower.indexOf('euv://') === 0) { return true; }
+    if (lower.indexOf('about:') === 0
+        || lower.indexOf('data:') === 0
+        || lower.indexOf('blob:') === 0
+        || lower.indexOf('javascript:') === 0) { return true; }
+    var u;
+    try { u = new URL(s, document.baseURI); } catch (e) { return true; }
+    var scheme = (u.protocol || '').replace(':', '').toLowerCase();
+    if (scheme === 'euv' || scheme === 'tauri' || scheme === 'asset'
+        || scheme === 'about' || scheme === 'data' || scheme === 'blob'
+        || scheme === 'javascript') { return true; }
+    if (scheme === 'http' || scheme === 'https') {
+      var host = (u.hostname || '').toLowerCase();
+      if (host === 'localhost' || host === 'tauri.localhost'
+          || host === '127.0.0.1' || host.indexOf('.localhost') !== -1
+          && host.lastIndexOf('.localhost') === host.length - '.localhost'.length) {
+        return true;
+      }
+      // Same-origin navigation inside the app stays in-app.
+      if (u.origin === window.location.origin) { return true; }
+      return false;
+    }
+    // Any other scheme (mailto:, tel:, ftp:, custom app links, …) is external.
+    return false;
+  }
+
+  function openExternal(href) {
+    var url;
+    try { url = new URL(String(href), document.baseURI).href; }
+    catch (e) { url = String(href); }
+    try {
+      var core = window.__TAURI__ && window.__TAURI__.core;
+      if (core && typeof core.invoke === 'function') {
+        core.invoke('plugin:opener|open_url', { url: url, with: null });
+        return true;
+      }
+      if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function') {
+        window.__TAURI_INTERNALS__.invoke('plugin:opener|open_url', { url: url, with: null });
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  // 1) Intercept link clicks (covers target="_blank" and normal anchors).
+  document.addEventListener('click', function (event) {
+    if (event.defaultPrevented || event.button !== 0
+        || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) { return; }
+    var node = event.target;
+    while (node && node.nodeName && node.nodeName.toLowerCase() !== 'a') {
+      node = node.parentNode;
+    }
+    if (!node || node.nodeName.toLowerCase() !== 'a') { return; }
+    var href = node.getAttribute('href') || node.href;
+    if (isInternal(href)) { return; }
+    if (openExternal(href)) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }, true);
+
+  // 2) Intercept window.open for external URLs.
+  var nativeOpen = window.open;
+  window.open = function (url, name, features) {
+    if (url && !isInternal(url)) {
+      if (openExternal(url)) { return null; }
+    }
+    return nativeOpen ? nativeOpen.apply(window, arguments) : null;
+  };
+})();
+"#;
+
+/// Injects the external-link interceptor into a webview as soon as a page starts
+/// loading. Registered via [`Builder::on_page_load`], so it runs for **every**
+/// webview, including dynamically created ones, on every navigation.
+///
+/// # Arguments
+///
+/// - `&Webview`: The webview that is loading a page.
+/// - `&PageLoadPayload`: The page load event payload (used to gate on start).
+fn inject_link_interceptor(webview: &Webview, payload: &PageLoadPayload<'_>) {
+    // Inject as early as possible so listeners are registered before user
+    // interaction. We inject on the start event of every page load.
+    if payload.event() != PageLoadEvent::Started {
+        return;
+    }
+    if let Err(error) = webview.eval(LINK_INTERCEPTOR_SCRIPT) {
+        euv_log!("[EUV] failed to inject link interceptor: {}", error);
+    }
+}
+
 /// Initializes and runs the Tauri application with EUV cache scheme.
 ///
 /// Sets up the custom URI scheme handler, deploys bundled cache,
@@ -21,6 +140,12 @@ pub fn run() {
             .expect("fatal: failed to build HTTP client")
     });
     Builder::default()
+        // Registered once at the Builder level so it runs for EVERY webview the
+        // app owns, including ones created dynamically at runtime. It injects a
+        // script that routes any external link to the system browser instead of
+        // navigating in-app.
+        .on_page_load(inject_link_interceptor)
+        .plugin(tauri_plugin_opener::init())
         .setup(|app: &mut App| {
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
