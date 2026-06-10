@@ -1,5 +1,7 @@
 use std::{
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -43,7 +45,11 @@ fn main() {
     if bundled_cache_dir.exists() && bundled_cache_dir.is_dir() {
         let mut files: Vec<PathBuf> = Vec::new();
         walk_dir(&bundled_cache_dir, &bundled_cache_dir, &mut files);
-        files.retain(|file_path: &PathBuf| file_path.to_str() != Some("_manifest.json"));
+        files.retain(|file_path: &PathBuf| {
+            file_path
+                .file_name()
+                .is_some_and(|name: &OsStr| name != "_manifest.json")
+        });
         let mut code: String = String::from("pub(crate) const BUNDLED_FILES:&[(&str,&[u8])]=&[");
         for file in &files {
             let relative_str: String = file.to_str().unwrap().replace('\\', "/");

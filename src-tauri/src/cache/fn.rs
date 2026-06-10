@@ -34,10 +34,10 @@ pub fn run() {
             spawn(async move {
                 deploy_bundled_cache(&setup_handle).await;
                 if has_active_cache(&setup_handle).await {
-                    crate::euv_log!("[EUV] cache ready, background update");
+                    euv_log!("[EUV] cache ready, background update");
                     background_update(handle).await;
                 } else {
-                    crate::euv_log!("[EUV] no cache, initial fetch");
+                    euv_log!("[EUV] no cache, initial fetch");
                     initial_fetch(handle).await;
                 }
             });
@@ -152,7 +152,7 @@ async fn switch_active_version(cache_root: &Path, version_name: &str) -> Result<
     rename(&temporary, &pointer)
         .await
         .map_err(|error: std::io::Error| CacheError::Write(error.to_string()))?;
-    crate::euv_log!("[EUV] switched active: {}", version_name);
+    euv_log!("[EUV] switched active: {}", version_name);
     Ok(())
 }
 
@@ -193,7 +193,7 @@ async fn cleanup_old_versions(cache_root: &Path, current: &str) {
             let log_name: String = name.clone();
             tauri::async_runtime::spawn(async move {
                 remove_dir_all(&dir_path).await.ok();
-                crate::euv_log!("[EUV] removed old version: {}", log_name);
+                euv_log!("[EUV] removed old version: {}", log_name);
             })
         })
         .collect();
@@ -360,7 +360,11 @@ fn clean_relative_path(path: &str) -> String {
     result.to_string()
 }
 
-/// Deploys bundled cache files asynchronously if no active deployment exists.
+/// Deploys bundled cache files asynchronously if they differ from the currently active version.
+///
+/// Compares each bundled file against the active version's content. Only creates a new
+/// version directory and switches the active pointer when at least one file has changed,
+/// avoiding unnecessary I/O on every cold start.
 ///
 /// # Arguments
 ///
@@ -368,7 +372,7 @@ fn clean_relative_path(path: &str) -> String {
 ///
 /// # Returns
 ///
-/// - `bool`: `true` if bundled files were deployed or an active deployment already exists, `false` otherwise.
+/// - `bool`: `true` if bundled files were deployed (new or unchanged), `false` on error.
 pub(crate) async fn deploy_bundled_cache(app_handle: &AppHandle) -> bool {
     if BUNDLED_FILES.is_empty() {
         return false;
@@ -377,12 +381,31 @@ pub(crate) async fn deploy_bundled_cache(app_handle: &AppHandle) -> bool {
         Ok(directory) => directory,
         Err(_) => return false,
     };
-    if let Some(existing) = read_active_version(&cache_root).await {
-        crate::euv_log!("[EUV] reusing existing active deployment: {existing}");
-        return true;
-    }
     if create_dir_all(&cache_root).await.is_err() {
         return false;
+    }
+    if let Some(active) = read_active_version(&cache_root).await {
+        let active_dir: PathBuf = cache_root.join(&active);
+        let mut has_changes: bool = false;
+        for (rel_path, data) in BUNDLED_FILES {
+            let existing: PathBuf = active_dir.join(rel_path);
+            match read(&existing).await {
+                Ok(existing_data) => {
+                    if existing_data[..] != data[..] {
+                        has_changes = true;
+                        break;
+                    }
+                }
+                Err(_) => {
+                    has_changes = true;
+                    break;
+                }
+            }
+        }
+        if !has_changes {
+            euv_log!("[EUV] bundled cache unchanged, reusing: {active}");
+            return true;
+        }
     }
     let version_name: String = new_version_name();
     let version_dir: PathBuf = cache_root.join(&version_name);
@@ -409,7 +432,8 @@ pub(crate) async fn deploy_bundled_cache(app_handle: &AppHandle) -> bool {
     {
         return false;
     }
-    crate::euv_log!("[EUV] deployed {count} bundled files, serving: {version_name}");
+    cleanup_old_versions(&cache_root, &version_name).await;
+    euv_log!("[EUV] deployed {count} bundled files, serving: {version_name}");
     true
 }
 
@@ -448,7 +472,7 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
     if html.is_empty() {
         return Err(CacheError::Fetch("empty HTML".to_string()));
     }
-    crate::euv_log!("[EUV] final URL after redirects: {}", final_url);
+    euv_log!("[EUV] final URL after redirects: {}", final_url);
     let version_name: String = new_version_name();
     let version_dir: PathBuf = cache_root.join(&version_name);
     create_dir_all(&version_dir)
@@ -479,7 +503,7 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
         verified_set.insert(clean.clone());
         let file_path: PathBuf = version_dir.join(&clean);
         if metadata(&file_path).await.is_err() {
-            crate::euv_log!("[EUV] missing critical resource: {}", clean);
+            euv_log!("[EUV] missing critical resource: {}", clean);
             remove_dir_all(&version_dir).await.ok();
             return Err(CacheError::Fetch(format!(
                 "incomplete snapshot: missing {}",
@@ -517,7 +541,7 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
         let clean: String = clean_relative_path(wasm_ref);
         let file_path: PathBuf = version_dir.join(&clean);
         if metadata(&file_path).await.is_err() {
-            crate::euv_log!("[EUV] missing critical WASM resource: {}", clean);
+            euv_log!("[EUV] missing critical WASM resource: {}", clean);
             remove_dir_all(&version_dir).await.ok();
             return Err(CacheError::Fetch(format!(
                 "incomplete snapshot: missing WASM {}",
@@ -525,7 +549,7 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
             )));
         }
     }
-    crate::euv_log!(
+    euv_log!(
         "[EUV] snapshot complete: {} resources fetched, all critical files verified",
         resource_count
     );
@@ -540,7 +564,7 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
 ///
 /// - `AppHandle`: The Tauri application handle (consumed for async task ownership).
 pub(crate) async fn initial_fetch(app_handle: AppHandle) {
-    crate::euv_log!("[EUV] initial fetch started");
+    euv_log!("[EUV] initial fetch started");
     let cache_root: PathBuf = match get_cache_root(&app_handle) {
         Ok(directory) => directory,
         Err(_) => return,
@@ -549,12 +573,12 @@ pub(crate) async fn initial_fetch(app_handle: AppHandle) {
     loop {
         match fetch_full_snapshot(&cache_root).await {
             Ok(version) => {
-                crate::euv_log!("[EUV] initial fetch done: {}", version);
+                euv_log!("[EUV] initial fetch done: {}", version);
                 notify_reload(&app_handle);
                 return;
             }
             Err(error) => {
-                crate::euv_log!("[EUV] initial fetch failed: {}, retrying", error);
+                euv_log!("[EUV] initial fetch failed: {}, retrying", error);
                 tokio::time::sleep(Duration::from_millis(RETRY_INTERVAL_MILLIS)).await;
             }
         }
@@ -569,7 +593,7 @@ pub(crate) async fn initial_fetch(app_handle: AppHandle) {
 ///
 /// - `AppHandle`: The Tauri application handle (consumed for async task ownership).
 pub(crate) async fn background_update(app_handle: AppHandle) {
-    crate::euv_log!("[EUV] background update started");
+    euv_log!("[EUV] background update started");
     let cache_root: PathBuf = match get_cache_root(&app_handle) {
         Ok(directory) => directory,
         Err(_) => return,
@@ -578,12 +602,12 @@ pub(crate) async fn background_update(app_handle: AppHandle) {
     loop {
         match fetch_full_snapshot(&cache_root).await {
             Ok(version) => {
-                crate::euv_log!("[EUV] background update done: {}", version);
+                euv_log!("[EUV] background update done: {}", version);
                 notify_reload(&app_handle);
                 return;
             }
             Err(error) => {
-                crate::euv_log!("[EUV] background update failed: {}, retrying", error);
+                euv_log!("[EUV] background update failed: {}, retrying", error);
                 tokio::time::sleep(Duration::from_millis(RETRY_INTERVAL_MILLIS)).await;
             }
         }
@@ -633,7 +657,7 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str)
     extract_attr_values(html, "img", "src", &mut paths);
     extract_module_imports(html, &mut paths);
     let base_url: String = derive_base_url(final_url);
-    crate::euv_log!("[EUV] resource base URL: {}", base_url);
+    euv_log!("[EUV] resource base URL: {}", base_url);
     let fetched: FetchResult = fetch_resource_list(&paths, &base_url, version_dir).await;
     let mut total_count: usize = fetched.len();
     let fetched_set: HashSet<String> = fetched
@@ -654,7 +678,7 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str)
         !fetched_set.contains(&clean) && extra_set.insert(clean)
     });
     if !extra_paths.is_empty() {
-        crate::euv_log!("[EUV] found {} extra dependencies in JS", extra_paths.len());
+        euv_log!("[EUV] found {} extra dependencies in JS", extra_paths.len());
         let extra_fetched: FetchResult =
             fetch_resource_list(&extra_paths, &base_url, version_dir).await;
         total_count += extra_fetched.len();
@@ -694,19 +718,19 @@ async fn fetch_resource_list(paths: &[String], base_url: &str, version_dir: &Pat
             match fetch_url(&url).await {
                 Ok(data) => {
                     if data.is_empty() {
-                        crate::euv_log!("[EUV] skipped empty resource: {}", clean);
+                        euv_log!("[EUV] skipped empty resource: {}", clean);
                         return None;
                     }
                     if let Err(error) = atomic_write(&local, &data).await {
-                        crate::euv_log!("[EUV] write failed {}: {}", clean, error);
+                        euv_log!("[EUV] write failed {}: {}", clean, error);
                         None
                     } else {
-                        crate::euv_log!("[EUV] fetched: {} ({} bytes)", clean, data.len());
+                        euv_log!("[EUV] fetched: {} ({} bytes)", clean, data.len());
                         Some((clean, data))
                     }
                 }
                 Err(error) => {
-                    crate::euv_log!("[EUV] fetch failed {}: {}", clean, error);
+                    euv_log!("[EUV] fetch failed {}: {}", clean, error);
                     None
                 }
             }
@@ -772,29 +796,87 @@ fn extract_wasm_references(js: &str, js_path: &str, results: &mut Vec<String>) {
 
 /// Extracts ES module import paths from source code.
 ///
-/// Looks for `from '...'` or `from "..."` patterns with relative paths.
+/// Looks for `import ... from '...'` and dynamic `import('...')` patterns.
+/// Supports destructured imports like `import init, { main } from './pkg/euv.js'`
+/// and bare relative paths that do not start with `./` or `../` but contain a `/`.
 ///
 /// # Arguments
 ///
 /// - `&str`: The source code to parse.
 /// - `&mut Vec<String>`: The collection to append discovered import paths to.
-fn extract_module_imports(html: &str, results: &mut Vec<String>) {
+fn extract_module_imports(source: &str, results: &mut Vec<String>) {
     let mut pos: usize = 0;
-    while pos < html.len() {
-        let index: usize = match html[pos..].find("from") {
+    while pos < source.len() {
+        let index: usize = match source[pos..].find("from") {
             Some(offset) => pos + offset,
             None => break,
         };
-        let after: &str = html[index + 4..].trim_start();
-        let value: &str = extract_quoted_value(after);
-        if !value.is_empty()
-            && (value.starts_with("./") || value.starts_with("../"))
-            && !results.contains(&value.to_string())
-        {
-            results.push(value.to_string());
+        let before: &str = &source[pos..index];
+        let is_import_context: bool = before
+            .trim_end()
+            .trim_end_matches(',')
+            .trim_end_matches('}')
+            .trim_end_matches('{')
+            .trim_end_matches(',')
+            .ends_with("import")
+            || before.trim_end().ends_with("import")
+            || before.rfind("import").is_some_and(|import_pos: usize| {
+                let after_import: &str = before[import_pos + 6..].trim();
+                after_import.is_empty()
+                    || after_import.chars().all(|c: char| {
+                        c.is_alphanumeric()
+                            || c == '_'
+                            || c == '{'
+                            || c == '}'
+                            || c == ','
+                            || c == '*'
+                            || c == ' '
+                            || c == '\t'
+                            || c == '\n'
+                            || c == '\r'
+                    })
+            });
+        if is_import_context {
+            let after: &str = source[index + 4..].trim_start();
+            let value: &str = extract_quoted_value(after);
+            if !value.is_empty()
+                && is_relative_resource_path(value)
+                && !results.contains(&value.to_string())
+            {
+                results.push(value.to_string());
+            }
         }
         pos = index + 4;
     }
+}
+
+/// Checks whether a path string refers to a relative resource that should be cached.
+///
+/// Accepts paths starting with `./` or `../`, as well as bare relative paths
+/// that contain a `/` and do not look like an npm package name.
+///
+/// # Arguments
+///
+/// - `&str`: The path string to evaluate.
+///
+/// # Returns
+///
+/// - `bool`: `true` if the path is a relative resource path, `false` otherwise.
+fn is_relative_resource_path(value: &str) -> bool {
+    if value.starts_with("./") || value.starts_with("../") {
+        return true;
+    }
+    if value.contains('/') && !value.contains("://") && !value.starts_with('@') {
+        return true;
+    }
+    if value.ends_with(".wasm")
+        || value.ends_with(".js")
+        || value.ends_with(".mjs")
+        || value.ends_with(".css")
+    {
+        return !value.contains("://");
+    }
+    false
 }
 
 /// Extracts attribute values from HTML tags matching the specified tag and attribute name.
@@ -813,6 +895,7 @@ fn extract_attr_values(html: &str, tag: &str, attr: &str, results: &mut Vec<Stri
     let attr_lower: String = attr.to_lowercase();
     let tag_prefix: String = format!("<{}", tag_lower);
     let attr_eq: String = format!("{}=", attr_lower);
+    let close_tag: String = format!("</{}", tag_lower);
     let mut pos: usize = 0;
     while pos < html.len() {
         let start: usize = match html[pos..].find(tag_prefix.as_str()) {
@@ -830,7 +913,22 @@ fn extract_attr_values(html: &str, tag: &str, attr: &str, results: &mut Vec<Stri
                 results.push(value.to_string());
             }
         }
-        pos = end + 1;
+        if content.to_lowercase().contains("type=\"module\"")
+            || content.to_lowercase().contains("type='module'")
+        {
+            let inner_end: usize = match html[end + 1..].find(close_tag.as_str()) {
+                Some(offset) => end + 1 + offset,
+                None => {
+                    pos = end + 1;
+                    continue;
+                }
+            };
+            let inner_html: &str = &html[end + 1..inner_end];
+            extract_module_imports(inner_html, results);
+            pos = inner_end;
+        } else {
+            pos = end + 1;
+        }
     }
 }
 
@@ -987,7 +1085,7 @@ pub(crate) async fn handle_euv_scheme(
     #[cfg(debug_assertions)]
     {
         let serve_path: String = file_path.to_string_lossy().into_owned();
-        crate::euv_log!("[EUV] serving: {}", serve_path);
+        euv_log!("[EUV] serving: {}", serve_path);
     }
     match read(&file_path).await {
         Ok(data) => {
