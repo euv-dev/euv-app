@@ -22,8 +22,9 @@ pub(crate) use {
     reqwest::{Client, redirect::Policy},
     serde::Serialize,
     tauri::{
-        App, AppHandle, Builder, Manager, RunEvent, UriSchemeResponder, async_runtime::spawn,
-        generate_context, generate_handler,
+        App, AppHandle, Builder, Manager, RunEvent, UriSchemeResponder, Webview,
+        async_runtime::spawn, generate_context, generate_handler,
+        webview::{PageLoadEvent, PageLoadPayload},
     },
     tokio::fs::{
         create_dir_all, metadata, read, read_dir, read_to_string, remove_dir_all, rename, write,
