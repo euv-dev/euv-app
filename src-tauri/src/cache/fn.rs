@@ -577,8 +577,9 @@ pub(crate) async fn initial_fetch(app_handle: AppHandle) {
     loop {
         match fetch_full_snapshot(&cache_root).await {
             Ok(version) => {
-                euv_log!("[EUV] initial fetch done: {}", version);
-                notify_reload(&app_handle);
+                // Do NOT reload the current session. The freshly committed
+                // active pointer takes effect on the NEXT launch only.
+                euv_log!("[EUV] initial fetch done (effective next launch): {}", version);
                 return;
             }
             Err(error) => {
@@ -606,8 +607,9 @@ pub(crate) async fn background_update(app_handle: AppHandle) {
     loop {
         match fetch_full_snapshot(&cache_root).await {
             Ok(version) => {
-                euv_log!("[EUV] background update done: {}", version);
-                notify_reload(&app_handle);
+                // Do NOT reload the current session. The freshly committed
+                // active pointer takes effect on the NEXT launch only.
+                euv_log!("[EUV] background update done (effective next launch): {}", version);
                 return;
             }
             Err(error) => {
@@ -1131,9 +1133,14 @@ fn extract_quoted_value(input: &str) -> &str {
 
 /// Emits a reload event to the frontend via Tauri.
 ///
+/// Currently unused: remote updates are intentionally applied on the NEXT
+/// launch only (the active pointer is switched but the running session is not
+/// reloaded). Kept for the case we later want to opt back into live reload.
+///
 /// # Arguments
 ///
 /// - `&AppHandle`: The Tauri application handle used to emit the event.
+#[allow(dead_code)]
 pub(crate) fn notify_reload(app_handle: &AppHandle) {
     use tauri::Emitter;
     if let Err(error) = app_handle.emit("euv://reload", ()) {
