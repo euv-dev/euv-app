@@ -23,7 +23,8 @@ pub(crate) use {
     serde::Serialize,
     tauri::{
         App, AppHandle, Builder, Manager, RunEvent, UriSchemeResponder, Webview,
-        async_runtime::spawn, generate_context, generate_handler,
+        async_runtime::spawn,
+        generate_context, generate_handler,
         webview::{PageLoadEvent, PageLoadPayload},
     },
     tokio::fs::{
