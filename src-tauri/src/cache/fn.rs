@@ -360,11 +360,18 @@ fn clean_relative_path(path: &str) -> String {
     result.to_string()
 }
 
-/// Deploys bundled cache files asynchronously if they differ from the currently active version.
+/// Deploys bundled cache files as a first-run seed only.
 ///
-/// Compares each bundled file against the active version's content. Only creates a new
-/// version directory and switches the active pointer when at least one file has changed,
-/// avoiding unnecessary I/O on every cold start.
+/// The bundled cache is purely a fallback so the very first cold start (right
+/// after install, before any remote fetch has completed) has something to
+/// render. Once any active version exists — whether it was seeded from the
+/// bundle or fetched in the background on a previous launch — this function is
+/// a no-op and the existing active pointer is preserved untouched.
+///
+/// This guarantees that every subsequent launch immediately serves the latest
+/// version the background updater committed last time, instead of ever being
+/// rolled back to the (older) compiled-in bundle. Remote updates keep happening
+/// in the background and take effect on the next launch.
 ///
 /// # Arguments
 ///
@@ -372,11 +379,9 @@ fn clean_relative_path(path: &str) -> String {
 ///
 /// # Returns
 ///
-/// - `bool`: `true` if bundled files were deployed (new or unchanged), `false` on error.
+/// - `bool`: `true` if an active version exists (reused or freshly seeded),
+///   `false` on error or when there is nothing to seed.
 pub(crate) async fn deploy_bundled_cache(app_handle: &AppHandle) -> bool {
-    if BUNDLED_FILES.is_empty() {
-        return false;
-    }
     let cache_root: PathBuf = match get_cache_root(app_handle) {
         Ok(directory) => directory,
         Err(_) => return false,
@@ -384,28 +389,18 @@ pub(crate) async fn deploy_bundled_cache(app_handle: &AppHandle) -> bool {
     if create_dir_all(&cache_root).await.is_err() {
         return false;
     }
+    // If any active version already exists, always reuse it as-is. Never
+    // overwrite or roll it back to the compiled-in bundle — the active pointer
+    // already references the newest snapshot committed by a previous launch's
+    // background update.
     if let Some(active) = read_active_version(&cache_root).await {
-        let active_dir: PathBuf = cache_root.join(&active);
-        let mut has_changes: bool = false;
-        for (rel_path, data) in BUNDLED_FILES {
-            let existing: PathBuf = active_dir.join(rel_path);
-            match read(&existing).await {
-                Ok(existing_data) => {
-                    if existing_data[..] != data[..] {
-                        has_changes = true;
-                        break;
-                    }
-                }
-                Err(_) => {
-                    has_changes = true;
-                    break;
-                }
-            }
-        }
-        if !has_changes {
-            euv_log!("[EUV] bundled cache unchanged, reusing: {active}");
-            return true;
-        }
+        euv_log!("[EUV] active cache present, reusing: {active}");
+        return true;
+    }
+    // No active version yet (fresh install): seed from the bundled snapshot so
+    // the first launch has content to render while the initial fetch runs.
+    if BUNDLED_FILES.is_empty() {
+        return false;
     }
     let version_name: String = new_version_name();
     let version_dir: PathBuf = cache_root.join(&version_name);
@@ -511,6 +506,7 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
             )));
         }
     }
+    // Collect the local cache paths of every WASM file referenced by a cached JS file.
     let mut wasm_paths: Vec<String> = Vec::new();
     let mut js_to_scan: Vec<String> = verified_set
         .iter()
@@ -534,12 +530,20 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
     for js_rel in &js_to_scan {
         let js_path: PathBuf = version_dir.join(js_rel);
         if let Ok(js_content) = read_to_string(&js_path).await {
-            extract_wasm_references(&js_content, js_rel, &mut wasm_paths);
+            let mut raw_refs: Vec<String> = Vec::new();
+            extract_wasm_references(&js_content, &mut raw_refs);
+            // Map each raw reference to its local cache path relative to the JS
+            // file's directory, so it matches where the resource was stored.
+            for raw_ref in &raw_refs {
+                let local: String = resolve_local_path(js_rel, raw_ref);
+                if !wasm_paths.contains(&local) {
+                    wasm_paths.push(local);
+                }
+            }
         }
     }
-    for wasm_ref in &wasm_paths {
-        let clean: String = clean_relative_path(wasm_ref);
-        let file_path: PathBuf = version_dir.join(&clean);
+    for clean in &wasm_paths {
+        let file_path: PathBuf = version_dir.join(clean);
         if metadata(&file_path).await.is_err() {
             euv_log!("[EUV] missing critical WASM resource: {}", clean);
             remove_dir_all(&version_dir).await.ok();
@@ -662,28 +666,184 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str)
     let mut total_count: usize = fetched.len();
     let fetched_set: HashSet<String> = fetched
         .iter()
-        .map(|(clean_path, _): &(String, Vec<u8>)| clean_path.clone())
+        .map(|(clean_path, _, _): &(String, String, Vec<u8>)| clean_path.clone())
         .collect();
-    let mut extra_paths: Vec<String> = Vec::new();
+    // Each extra dependency is resolved against the FINAL url of the JS file that
+    // referenced it, so redirected resources still yield correct download URLs.
+    let mut extra_deps: Vec<(String, String)> = Vec::new(); // (absolute_url, clean_path)
     let mut extra_set: HashSet<String> = HashSet::new();
-    for (clean_path, data) in &fetched {
+    for (clean_path, res_final_url, data) in &fetched {
         if clean_path.ends_with(".js") || clean_path.ends_with(".mjs") {
             let js_content: String = String::from_utf8_lossy(data).to_string();
-            extract_wasm_references(&js_content, clean_path, &mut extra_paths);
-            extract_module_imports(&js_content, &mut extra_paths);
+            let mut refs: Vec<String> = Vec::new();
+            extract_wasm_references(&js_content, &mut refs);
+            extract_module_imports(&js_content, &mut refs);
+            for raw_ref in &refs {
+                if raw_ref.starts_with("data:")
+                    || raw_ref.starts_with("http://")
+                    || raw_ref.starts_with("https://")
+                    || raw_ref.starts_with("//")
+                {
+                    continue;
+                }
+                // Local cache path is resolved relative to the directory of the
+                // referencing JS file, so a `pkg/euv.js` referencing `euv_bg.wasm`
+                // is stored as `pkg/euv_bg.wasm` (matching how it is later served).
+                let dep_clean: String = resolve_local_path(clean_path, raw_ref);
+                if fetched_set.contains(&dep_clean) || !extra_set.insert(dep_clean.clone()) {
+                    continue;
+                }
+                // Download URL is resolved against the JS file's FINAL url so
+                // redirected resources still yield correct absolute URLs.
+                let dep_url: String = resolve_against(res_final_url, raw_ref);
+                extra_deps.push((dep_url, dep_clean));
+            }
         }
     }
-    extra_paths.retain(|p: &String| {
-        let clean: String = clean_relative_path(p);
-        !fetched_set.contains(&clean) && extra_set.insert(clean)
-    });
-    if !extra_paths.is_empty() {
-        euv_log!("[EUV] found {} extra dependencies in JS", extra_paths.len());
-        let extra_fetched: FetchResult =
-            fetch_resource_list(&extra_paths, &base_url, version_dir).await;
-        total_count += extra_fetched.len();
+    if !extra_deps.is_empty() {
+        euv_log!("[EUV] found {} extra dependencies in JS", extra_deps.len());
+        let extra_fetched: usize = fetch_absolute_list(&extra_deps, version_dir).await;
+        total_count += extra_fetched;
     }
     total_count
+}
+
+/// Resolves a relative reference against a base URL (typically a resource's
+/// final URL after redirects).
+///
+/// Handles `./`, `../`, root-relative (`/...`) and bare relative references by
+/// performing path-segment resolution against the base URL's directory.
+///
+/// # Arguments
+///
+/// - `&str`: The base URL (e.g. the final URL of the JS file).
+/// - `&str`: The relative reference to resolve.
+///
+/// # Returns
+///
+/// - `String`: The absolute URL of the referenced resource.
+fn resolve_against(base_url: &str, reference: &str) -> String {
+    // Split scheme://host from the path portion.
+    let scheme_end: usize = base_url.find("://").map_or(0, |p: usize| p + 3);
+    let after_scheme: &str = &base_url[scheme_end..];
+    let host_end: usize = after_scheme
+        .find('/')
+        .map_or(after_scheme.len(), |p: usize| p);
+    let origin: &str = &base_url[..scheme_end + host_end];
+    let base_path: &str = &base_url[scheme_end + host_end..];
+
+    // Root-relative reference: anchor at origin.
+    if let Some(rooted) = reference.strip_prefix('/') {
+        return format!("{}/{}", origin, rooted);
+    }
+
+    // Derive the directory of the base path (strip the last segment).
+    let dir: &str = match base_path.rfind('/') {
+        Some(pos) => &base_path[..pos],
+        None => "",
+    };
+    let mut segments: Vec<&str> = dir.split('/').filter(|s: &&str| !s.is_empty()).collect();
+    for part in reference.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    format!("{}/{}", origin, segments.join("/"))
+}
+
+/// Resolves a relative reference into a local cache path, relative to the
+/// directory of the referencing file.
+///
+/// Mirrors `resolve_against` but operates on local (path-only) values so the
+/// on-disk layout matches the served URL layout. For example, a `pkg/euv.js`
+/// that references `euv_bg.wasm` yields `pkg/euv_bg.wasm`; a reference of
+/// `../assets/x.png` yields `assets/x.png`.
+///
+/// # Arguments
+///
+/// - `&str`: The clean path of the referencing file (e.g. `pkg/euv.js`).
+/// - `&str`: The relative reference as written in the source.
+///
+/// # Returns
+///
+/// - `String`: The cleaned local path where the referenced file should be stored.
+fn resolve_local_path(referencing_clean_path: &str, reference: &str) -> String {
+    // Root-relative reference is anchored at the cache root.
+    if let Some(rooted) = reference.strip_prefix('/') {
+        return clean_relative_path(rooted);
+    }
+    // Start from the directory of the referencing file.
+    let dir: &str = match referencing_clean_path.rfind('/') {
+        Some(pos) => &referencing_clean_path[..pos],
+        None => "",
+    };
+    let mut segments: Vec<&str> = dir.split('/').filter(|s: &&str| !s.is_empty()).collect();
+    for part in reference.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    segments.join("/")
+}
+
+/// Fetches a list of (absolute_url, clean_path) dependencies concurrently and
+/// writes them to disk under the version directory.
+///
+/// Unlike `fetch_resource_list`, the download URL is provided directly (already
+/// resolved against the referencing resource's final URL), so no base-URL
+/// concatenation is performed.
+///
+/// # Arguments
+///
+/// - `&[(String, String)]`: List of (absolute_url, clean_path) pairs.
+/// - `&Path`: The version directory where resources should be saved.
+///
+/// # Returns
+///
+/// - `usize`: The number of dependencies successfully fetched and written.
+async fn fetch_absolute_list(deps: &[(String, String)], version_dir: &Path) -> usize {
+    let mut join_set: tokio::task::JoinSet<bool> = tokio::task::JoinSet::new();
+    for (url, clean) in deps {
+        let url: String = url.clone();
+        let clean: String = clean.clone();
+        let local: PathBuf = version_dir.join(&clean);
+        join_set.spawn(async move {
+            match fetch_url(&url).await {
+                Ok(data) => {
+                    if data.is_empty() {
+                        euv_log!("[EUV] skipped empty resource: {}", clean);
+                        return false;
+                    }
+                    if let Err(error) = atomic_write(&local, &data).await {
+                        euv_log!("[EUV] write failed {}: {}", clean, error);
+                        false
+                    } else {
+                        euv_log!("[EUV] fetched dep: {} ({} bytes) from {}", clean, data.len(), url);
+                        true
+                    }
+                }
+                Err(error) => {
+                    euv_log!("[EUV] fetch failed {}: {}", clean, error);
+                    false
+                }
+            }
+        });
+    }
+    let mut count: usize = 0;
+    while let Some(result) = join_set.join_next().await {
+        if let Ok(true) = result {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Fetches a list of resource URLs concurrently and writes them to disk.
@@ -702,7 +862,8 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str)
 ///
 /// - `FetchResult`: A vector of (clean_path, data) tuples for successfully fetched resources.
 async fn fetch_resource_list(paths: &[String], base_url: &str, version_dir: &Path) -> FetchResult {
-    let mut join_set: tokio::task::JoinSet<Option<(String, Vec<u8>)>> = tokio::task::JoinSet::new();
+    let mut join_set: tokio::task::JoinSet<Option<(String, String, Vec<u8>)>> =
+        tokio::task::JoinSet::new();
     for relative_path in paths {
         if relative_path.starts_with("data:")
             || relative_path.starts_with("http://")
@@ -715,8 +876,11 @@ async fn fetch_resource_list(paths: &[String], base_url: &str, version_dir: &Pat
         let url: String = format!("{}/{}", base_url, clean);
         let local: PathBuf = version_dir.join(&clean);
         join_set.spawn(async move {
-            match fetch_url(&url).await {
-                Ok(data) => {
+            // Capture each resource's OWN final URL after redirects so transitive
+            // dependencies (e.g. a `.wasm` referenced from this JS) resolve against
+            // the correct location even when the resource itself was redirected.
+            match fetch_url_with_final_url(&url).await {
+                Ok((final_url, data)) => {
                     if data.is_empty() {
                         euv_log!("[EUV] skipped empty resource: {}", clean);
                         return None;
@@ -725,8 +889,12 @@ async fn fetch_resource_list(paths: &[String], base_url: &str, version_dir: &Pat
                         euv_log!("[EUV] write failed {}: {}", clean, error);
                         None
                     } else {
-                        euv_log!("[EUV] fetched: {} ({} bytes)", clean, data.len());
-                        Some((clean, data))
+                        if final_url != url {
+                            euv_log!("[EUV] fetched: {} ({} bytes) [redirected -> {}]", clean, data.len(), final_url);
+                        } else {
+                            euv_log!("[EUV] fetched: {} ({} bytes)", clean, data.len());
+                        }
+                        Some((clean, final_url, data))
                     }
                 }
                 Err(error) => {
@@ -747,20 +915,15 @@ async fn fetch_resource_list(paths: &[String], base_url: &str, version_dir: &Pat
 
 /// Extracts WASM file references from JavaScript source code.
 ///
-/// Looks for `.wasm` string literals and resolves them relative to the JS file's directory.
-/// Uses `HashSet`-compatible dedup via the caller's `HashSet` for O(1) lookups.
+/// Returns the raw references exactly as written in the source. The caller is
+/// responsible for resolving them against the JS file's final URL (download)
+/// and directory (local cache path).
 ///
 /// # Arguments
 ///
 /// - `&str`: The JavaScript source code.
-/// - `&str`: The relative path of the JS file (used to resolve relative WASM paths).
 /// - `&mut Vec<String>`: The collection to append discovered WASM paths to.
-fn extract_wasm_references(js: &str, js_path: &str, results: &mut Vec<String>) {
-    let js_dir: &str = if let Some(pos) = js_path.rfind('/') {
-        &js_path[..pos]
-    } else {
-        ""
-    };
+fn extract_wasm_references(js: &str, results: &mut Vec<String>) {
     let mut pos: usize = 0;
     while pos < js.len() {
         let index: usize = match js[pos..].find(".wasm") {
@@ -781,13 +944,13 @@ fn extract_wasm_references(js: &str, js_path: &str, results: &mut Vec<String>) {
             && !wasm_file.contains("://")
             && !wasm_file.contains(' ')
         {
-            let resolved: String = if js_dir.is_empty() {
-                wasm_file.to_string()
-            } else {
-                format!("{}/{}", js_dir, wasm_file)
-            };
-            if !results.contains(&resolved) {
-                results.push(resolved);
+            // Return the raw reference exactly as written in the JS source. The
+            // caller resolves it against the JS file's final URL (for the
+            // download URL) and against the JS file's directory (for the local
+            // cache path), so prefixing the JS directory here would double it.
+            let raw: String = wasm_file.to_string();
+            if !results.contains(&raw) {
+                results.push(raw);
             }
         }
         pos = index + 5;
