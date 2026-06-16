@@ -2,5 +2,6 @@
 description = "Default permissions for euv-app commands"
 permissions = [
     "allow-load-cached-resource",
+    "allow-update-cache",
     "allow-resolve-bridge-group-permissions",
 ]

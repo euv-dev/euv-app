@@ -254,7 +254,9 @@ async function main() {
       // dependencies discovered inside it resolve against the correct base.
       const { finalUrl: resFinalUrl, body: data } = await downloadUrl(url);
       if (data.length === 0) {
-        console.warn(`[prefetch-cache]   WARN: Empty response for ${cleanPath}, skipping`);
+        console.warn(
+          `[prefetch-cache]   WARN: Empty response for ${cleanPath}, skipping`,
+        );
         continue;
       }
       fs.writeFileSync(localPath, data);
@@ -283,10 +285,7 @@ async function main() {
       const jsContent = data.toString('utf-8');
       const deps = extractJsDependencies(jsContent, resFinalUrl, cleanPath);
       for (const dep of deps) {
-        if (
-          !fetchedPaths.has(dep.cleanPath) &&
-          !extraSeen.has(dep.cleanPath)
-        ) {
+        if (!fetchedPaths.has(dep.cleanPath) && !extraSeen.has(dep.cleanPath)) {
           extraSeen.add(dep.cleanPath);
           extraDeps.push(dep);
         }
@@ -295,7 +294,9 @@ async function main() {
   }
 
   if (extraDeps.length > 0) {
-    console.log(`[prefetch-cache] Found ${extraDeps.length} extra dependencies in JS`);
+    console.log(
+      `[prefetch-cache] Found ${extraDeps.length} extra dependencies in JS`,
+    );
     for (const { url, cleanPath } of extraDeps) {
       const localPath = path.join(BUNDLED_CACHE_DIR, cleanPath);
 
@@ -305,7 +306,9 @@ async function main() {
         console.log(`[prefetch-cache]   Fetching: ${cleanPath}`);
         const { finalUrl: depFinalUrl, body: data } = await downloadUrl(url);
         if (data.length === 0) {
-          console.warn(`[prefetch-cache]   WARN: Empty response for ${cleanPath}, skipping`);
+          console.warn(
+            `[prefetch-cache]   WARN: Empty response for ${cleanPath}, skipping`,
+          );
           continue;
         }
         fs.writeFileSync(localPath, data);
@@ -352,6 +355,10 @@ async function main() {
   console.log(
     `[prefetch-cache] Done! ${manifest.files.length} files bundled into src-tauri/bundled-cache/`,
   );
+  // Node.js http/https agents keep sockets alive (Connection: keep-alive),
+  // which prevents the event loop from becoming empty. Force-exit so the
+  // build pipeline does not hang after all files are written.
+  process.exit(0);
 }
 
 main().catch((err) => {

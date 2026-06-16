@@ -22,6 +22,7 @@ const LINK_INTERCEPTOR_SCRIPT: &str = r#"
 (function () {
   if (window.__euvLinkGuard) { return; }
   window.__euvLinkGuard = true;
+  if (!window.bridge && window.__TAURI__) { window.bridge = window.__TAURI__; delete window.__TAURI__; }
 
   function isInternal(href) {
     if (!href) { return true; }
@@ -46,11 +47,9 @@ const LINK_INTERCEPTOR_SCRIPT: &str = r#"
           && host.lastIndexOf('.localhost') === host.length - '.localhost'.length) {
         return true;
       }
-      // Same-origin navigation inside the app stays in-app.
       if (u.origin === window.location.origin) { return true; }
       return false;
     }
-    // Any other scheme (mailto:, tel:, ftp:, custom app links, …) is external.
     return false;
   }
 
@@ -59,7 +58,7 @@ const LINK_INTERCEPTOR_SCRIPT: &str = r#"
     try { url = new URL(String(href), document.baseURI).href; }
     catch (e) { url = String(href); }
     try {
-      var core = window.__TAURI__ && window.__TAURI__.core;
+      var core = window.bridge && window.bridge.core;
       if (core && typeof core.invoke === 'function') {
         core.invoke('plugin:opener|open_url', { url: url, with: null });
         return true;
@@ -158,12 +157,13 @@ pub fn run() {
             let setup_handle: AppHandle = handle.clone();
             spawn(async move {
                 deploy_bundled_cache(&setup_handle).await;
-                if has_active_cache(&setup_handle).await {
-                    euv_log!("[EUV] cache ready, background update");
-                    background_update(handle).await;
-                } else {
+                if !has_active_cache(&setup_handle).await {
                     euv_log!("[EUV] no cache, initial fetch");
                     initial_fetch(handle).await;
+                } else {
+                    euv_log!(
+                        "[EUV] cache ready, skipping auto-update; client will call update_cache"
+                    );
                 }
             });
             Ok(())
@@ -183,6 +183,7 @@ pub fn run() {
         )
         .invoke_handler(generate_handler![
             load_cached_resource,
+            update_cache,
             resolve_bridge_group_permissions
         ])
         .build(generate_context!())
@@ -718,39 +719,6 @@ pub(crate) async fn initial_fetch(app_handle: AppHandle) {
     }
 }
 
-/// Performs a background cache update, retrying on failure until successful.
-///
-/// The updated cache will take effect on the next application launch.
-///
-/// # Arguments
-///
-/// - `AppHandle`: The Tauri application handle (consumed for async task ownership).
-pub(crate) async fn background_update(app_handle: AppHandle) {
-    euv_log!("[EUV] background update started");
-    let cache_root: PathBuf = match get_cache_root(&app_handle) {
-        Ok(directory) => directory,
-        Err(_) => return,
-    };
-    create_dir_all(&cache_root).await.ok();
-    loop {
-        match fetch_full_snapshot(&cache_root).await {
-            Ok(version) => {
-                // Do NOT reload the current session. The freshly committed
-                // active pointer takes effect on the NEXT launch only.
-                euv_log!(
-                    "[EUV] background update done (effective next launch): {}",
-                    version
-                );
-                return;
-            }
-            Err(error) => {
-                euv_log!("[EUV] background update failed: {}, retrying", error);
-                tokio::time::sleep(Duration::from_millis(RETRY_INTERVAL_MILLIS)).await;
-            }
-        }
-    }
-}
-
 /// Derives the base URL from a final URL by stripping the last path segment.
 ///
 /// # Arguments
@@ -1262,25 +1230,6 @@ fn extract_quoted_value(input: &str) -> &str {
     ""
 }
 
-/// Emits a reload event to the frontend via Tauri.
-///
-/// Currently unused: remote updates are intentionally applied on the NEXT
-/// launch only (the active pointer is switched but the running session is not
-/// reloaded). Kept for the case we later want to opt back into live reload.
-///
-/// # Arguments
-///
-/// - `&AppHandle`: The Tauri application handle used to emit the event.
-#[allow(dead_code)]
-pub(crate) fn notify_reload(app_handle: &AppHandle) {
-    use tauri::Emitter;
-    if let Err(error) = app_handle.emit("euv://reload", ()) {
-        ::log::warn!("[EUV] failed to emit reload event: {}", error);
-    } else {
-        ::log::info!("[EUV] reload event emitted");
-    }
-}
-
 /// Returns the MIME type string for a given file path based on its extension.
 ///
 /// Uses `rfind` to locate the last dot in the path and performs case-insensitive
@@ -1449,6 +1398,40 @@ pub(crate) async fn handle_euv_scheme(
             .body(Cow::Owned(b"Not found".to_vec()))
             .unwrap(),
     }
+}
+
+/// Tauri command that triggers an immediate cache update from the remote source.
+///
+/// Fetches the latest resources and switches the active version pointer so the
+/// new content takes effect on the **next** application launch.  The command
+/// returns only after the update has completed (or failed).
+///
+/// This is the client-initiated counterpart to the former automatic
+/// `background_update`: instead of pulling on every native startup, the
+/// frontend decides *when* to pull (e.g. via `window.bridge.core.invoke("update_cache")`).
+///
+/// # Arguments
+///
+/// - `AppHandle`: The Tauri application handle.
+///
+/// # Returns
+///
+/// - `Result<String, String>`: The new snapshot name on success, or an error message string.
+#[tauri::command]
+pub(crate) async fn update_cache(app_handle: AppHandle) -> Result<String, String> {
+    let cache_root: PathBuf =
+        get_cache_root(&app_handle).map_err(|error: CacheError| error.to_string())?;
+    create_dir_all(&cache_root)
+        .await
+        .map_err(|error: std::io::Error| error.to_string())?;
+    let snapshot: String = fetch_full_snapshot(&cache_root)
+        .await
+        .map_err(|error: CacheError| error.to_string())?;
+    euv_log!(
+        "[EUV] update_cache done (effective next launch): {}",
+        snapshot
+    );
+    Ok(snapshot)
 }
 
 /// Tauri command that returns cached page metadata.

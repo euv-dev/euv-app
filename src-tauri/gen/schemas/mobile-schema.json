@@ -345,10 +345,10 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Default permissions for euv-app commands\n#### This default permission set includes:\n\n- `allow-load-cached-resource`\n- `allow-resolve-bridge-group-permissions`",
+          "description": "Default permissions for euv-app commands\n#### This default permission set includes:\n\n- `allow-load-cached-resource`\n- `allow-update-cache`\n- `allow-resolve-bridge-group-permissions`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for euv-app commands\n#### This default permission set includes:\n\n- `allow-load-cached-resource`\n- `allow-resolve-bridge-group-permissions`"
+          "markdownDescription": "Default permissions for euv-app commands\n#### This default permission set includes:\n\n- `allow-load-cached-resource`\n- `allow-update-cache`\n- `allow-resolve-bridge-group-permissions`"
         },
         {
           "description": "Enables the load_cached_resource command to serve cached web resources",
@@ -361,6 +361,12 @@
           "type": "string",
           "const": "allow-resolve-bridge-group-permissions",
           "markdownDescription": "Enables the resolve_bridge_group_permissions command to query Android permission groups"
+        },
+        {
+          "description": "Enables the update_cache command to fetch the latest remote resources and prepare them for the next launch",
+          "type": "string",
+          "const": "allow-update-cache",
+          "markdownDescription": "Enables the update_cache command to fetch the latest remote resources and prepare them for the next launch"
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

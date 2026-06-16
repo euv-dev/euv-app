@@ -8,6 +8,7 @@
     "opener:default",
     "opener:allow-open-url",
     "allow-load-cached-resource",
+    "allow-update-cache",
     "allow-resolve-bridge-group-permissions"
   ],
   "platforms": ["android", "linux", "macOS", "windows"],

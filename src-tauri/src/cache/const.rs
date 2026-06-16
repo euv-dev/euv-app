@@ -25,16 +25,17 @@ pub(crate) const MAX_KEPT_VERSIONS: usize = 2;
 /// JavaScript snippet injected into index.html to listen for reload events from the Tauri backend.
 pub(crate) const RELOAD_LISTENER_SCRIPT: &str = r#"<script>
 (function(){
-  if(window.__TAURI__&&window.__TAURI__.event){
-    window.__TAURI__.event.listen('euv://reload',function(){
+  if(!window.bridge&&window.__TAURI__){window.bridge=window.__TAURI__;delete window.__TAURI__;}
+  if(window.bridge&&window.bridge.event){
+    window.bridge.event.listen('euv://reload',function(){
       window.location.reload();
     });
   } else {
     document.addEventListener('DOMContentLoaded',function(){
       var t=setInterval(function(){
-        if(window.__TAURI__&&window.__TAURI__.event){
+        if(window.bridge&&window.bridge.event){
           clearInterval(t);
-          window.__TAURI__.event.listen('euv://reload',function(){
+          window.bridge.event.listen('euv://reload',function(){
             window.location.reload();
           });
         }
@@ -102,8 +103,9 @@ pub(crate) const DEBUG_PANEL_SCRIPT: &str = r#"<script>
   }
 
   function initListener(){
-    if(window.__TAURI__&&window.__TAURI__.event){
-      window.__TAURI__.event.listen('euv://debug-log',function(e){
+    if(!window.bridge&&window.__TAURI__){window.bridge=window.__TAURI__;delete window.__TAURI__;}
+    if(window.bridge&&window.bridge.event){
+      window.bridge.event.listen('euv://debug-log',function(e){
         addLog(e.payload||'');
       });
       addLog('[panel] listener registered');
@@ -111,9 +113,9 @@ pub(crate) const DEBUG_PANEL_SCRIPT: &str = r#"<script>
       addLog('[panel] path: {{PATH}}');
     } else {
       var t=setInterval(function(){
-        if(window.__TAURI__&&window.__TAURI__.event){
+        if(window.bridge&&window.bridge.event){
           clearInterval(t);
-          window.__TAURI__.event.listen('euv://debug-log',function(e){
+          window.bridge.event.listen('euv://debug-log',function(e){
             addLog(e.payload||'');
           });
           addLog('[panel] listener registered');
