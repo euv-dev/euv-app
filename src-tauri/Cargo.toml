@@ -6,7 +6,7 @@ edition = "2024"
 
 [lib]
 name = "euv_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }
@@ -21,7 +21,10 @@ tauri-plugin-log = "2.8.0"
 tauri-plugin-opener = "2"
 tauri = { version = "2.11.2", features = [] }
 serde = { version = "1.0.228", features = ["derive"] }
-tokio = { version = "1.52.3", features = ["time", "fs"] }
+tokio = { version = "1.52.3", features = [
+    "time",
+    "fs",
+], default-features = false }
 # NOTE: Pinned to 0.12 on purpose. reqwest 0.13 switched its default TLS
 # certificate verifier to `rustls-platform-verifier`, which panics on Android
 # unless `rustls_platform_verifier::android::init_hosted()` is called via JNI
@@ -30,8 +33,6 @@ tokio = { version = "1.52.3", features = ["time", "fs"] }
 reqwest = { version = "0.12", features = [
     "rustls-tls-webpki-roots",
     "gzip",
-    "brotli",
-    "deflate",
 ], default-features = false }
 
 [profile.dev]
@@ -47,7 +48,7 @@ strip = "debuginfo"
 incremental = false
 opt-level = 3
 lto = true
-panic = "unwind"
+panic = "abort"
 debug = false
 codegen-units = 1
-strip = "debuginfo"
+strip = "symbols"
