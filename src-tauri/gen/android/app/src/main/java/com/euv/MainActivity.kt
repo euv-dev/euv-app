@@ -85,6 +85,8 @@ class MainActivity : TauriActivity() {
         addSplashOverlay()
         if (AppConfig.IMMERSIVE_MODE) {
             enableImmersiveMode()
+        } else if (AppConfig.TRANSPARENT_NAVIGATION_BAR) {
+            enableTransparentNavigationBar()
         }
         setMaxFrameRate()
         if (AppConfig.KEEP_ALIVE_SERVICE) {
@@ -180,10 +182,33 @@ class MainActivity : TauriActivity() {
         }
     }
 
+    private fun enableTransparentNavigationBar() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            )
+        }
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus && AppConfig.IMMERSIVE_MODE) {
             enableImmersiveMode()
+        } else if (hasFocus && AppConfig.TRANSPARENT_NAVIGATION_BAR) {
+            enableTransparentNavigationBar()
         }
         if (hasFocus) {
             setMaxFrameRate()

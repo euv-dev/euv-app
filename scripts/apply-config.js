@@ -243,6 +243,7 @@ object AppConfig {
     const val SPLASH_FADE_DURATION_MS = ${config.ui.splashFadeDurationMs}L
     const val SPLASH_MAX_WAIT_MS = ${config.ui.splashMaxWaitMs}L
     const val IMMERSIVE_MODE = ${config.ui.immersiveMode}
+    const val TRANSPARENT_NAVIGATION_BAR = ${config.ui.transparentNavigationBar ?? false}
     const val ANTI_ALIASING = ${config.ui.antiAliasing ?? false}
     const val MAX_FRAME_RATE_ENABLED = ${config.ui.maxFrameRateEnabled ?? false}
 
