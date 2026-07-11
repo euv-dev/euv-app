@@ -1,7 +1,7 @@
 *.log
 *.pid
 /data
-/target
+target
 /.vscode
 node_modules
 .DS_Store
@@ -13,7 +13,7 @@ gen/android/build/
 gen/android/.gradle/
 gen/android/app/build/
 gen/android/app/src/main/assets/
-src-tauri/target/
+src-tauritarget/
 src-tauri/gen/apple/build/
 *.apk
 *.aab
