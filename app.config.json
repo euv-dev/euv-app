@@ -1,5 +1,4 @@
 {
-  "$schema": "./app.config.schema.json",
   "app": {
     "name": "Euv",
     "identifier": "com.euv",
