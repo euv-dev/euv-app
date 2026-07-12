@@ -14,7 +14,7 @@
     "maxRedirects": 10
   },
   "ui": {
-    "backgroundColor": "#FFFFFF",
+    "backgroundColor": "#ffffff",
     "loadingSpinnerColor": "#1677ff",
     "loadingSpinnerTrackColor": "#e0e0e0",
     "splashFadeDurationMs": 300,

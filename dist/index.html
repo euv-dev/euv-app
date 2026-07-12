@@ -2,44 +2,48 @@
 <html>
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
     <title>Euv</title>
-    <style>html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#FFFFFF}</style>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #ffffff;
+      }
+    </style>
   </head>
   <body>
     <script>
-      (function() {
+      (function () {
         function getSchemeUrl(path) {
           var ua = navigator.userAgent || navigator.platform || '';
           return /Win|Android/.test(ua)
             ? 'https://euv.localhost/' + path
             : 'euv://localhost/' + path;
         }
-
-        // Fast adaptive polling: start at a very short interval so the very common
-        // case (bundled cache deployed synchronously during Rust setup) navigates
-        // almost immediately, then back off gradually for the rare offline-fetch path.
         var attempts = 0;
         var navigated = false;
-
         function nextDelay() {
-          // 16ms for the first ~10 tries (~1 frame), then ramp toward 500ms cap.
           if (attempts < 10) return 16;
           if (attempts < 20) return 100;
           return 500;
         }
-
         function navigate() {
           if (navigated) return;
           navigated = true;
           window.location.replace(getSchemeUrl('index.html'));
         }
-
         function pollForCache() {
           if (navigated) return;
           var internals = window.__TAURI_INTERNALS__;
           if (!internals || !internals.invoke) {
-            // Tauri bridge not injected yet; retry on the next frame.
             attempts++;
             setTimeout(pollForCache, nextDelay());
             return;
@@ -53,12 +57,11 @@
                 setTimeout(pollForCache, nextDelay());
               }
             })
-            .catch(function() {
+            .catch(function () {
               attempts++;
               setTimeout(pollForCache, nextDelay());
             });
         }
-
         pollForCache();
       })();
     </script>

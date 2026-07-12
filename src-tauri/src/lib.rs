@@ -19,8 +19,9 @@ pub(crate) use std::{
 };
 
 pub(crate) use {
-    reqwest::{Client, redirect::Policy},
-    serde::Serialize,
+    lombok_macros::*,
+    reqwest::Client,
+    serde::{Serialize, Serializer},
     tauri::{
         App, AppHandle, Builder, Manager, RunEvent, UriSchemeResponder, Webview,
         async_runtime::spawn,

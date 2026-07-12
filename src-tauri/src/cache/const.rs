@@ -7,12 +7,6 @@ pub(crate) const ACTIVE_LINK: &str = "active";
 /// The prefix for version directory names.
 pub(crate) const VERSION_PREFIX: &str = "v_";
 
-/// HTTP client timeout in seconds for fetch operations.
-pub(crate) const FETCH_TIMEOUT_SECS: u64 = 30;
-
-/// Maximum allowed response body size in bytes (10 MiB).
-pub(crate) const MAX_BODY_SIZE: usize = 10485760;
-
 /// Interval in milliseconds between fetch retry attempts.
 pub(crate) const RETRY_INTERVAL_MILLIS: u64 = 1000;
 
@@ -22,9 +16,21 @@ pub(crate) const SCHEME_NAME: &str = "euv";
 /// Maximum number of old version directories to keep.
 pub(crate) const MAX_KEPT_VERSIONS: usize = 2;
 
+/// String tag emitted by native on a successful `update_cache`.
+///
+/// Must stay in lockstep with `CacheUpdateStatus::as_tag()` in the
+/// euv-app bridge layer — both ends compare against the same literal so
+/// a future renumbering / re-case here breaks the webview retry loop.
+pub(crate) const UPDATE_RESULT_SUCCESS: &str = "success";
+
+/// String tag emitted by native on a failed `update_cache`.
+///
+/// See `UPDATE_RESULT_SUCCESS` for the cross-side coupling note.
+pub(crate) const UPDATE_RESULT_FAILED: &str = "failed";
+
 /// JavaScript snippet injected into index.html to listen for reload events from the Tauri backend.
 pub(crate) const RELOAD_LISTENER_SCRIPT: &str = r#"<script>
-(function(){
+(function (){
   if(!window.bridge&&window.__TAURI__){window.bridge=window.__TAURI__;delete window.__TAURI__;}
   if(window.bridge&&window.bridge.event){
     window.bridge.event.listen('euv://reload',function(){
@@ -32,7 +38,7 @@ pub(crate) const RELOAD_LISTENER_SCRIPT: &str = r#"<script>
     });
   } else {
     document.addEventListener('DOMContentLoaded',function(){
-      var t=setInterval(function(){
+      var t=setInterval(function (){
         if(window.bridge&&window.bridge.event){
           clearInterval(t);
           window.bridge.event.listen('euv://reload',function(){
@@ -40,7 +46,7 @@ pub(crate) const RELOAD_LISTENER_SCRIPT: &str = r#"<script>
           });
         }
       },100);
-      setTimeout(function(){clearInterval(t);},10000);
+      setTimeout(function (){clearInterval(t);},10000);
     });
   }
 })();
@@ -51,7 +57,7 @@ pub(crate) const RELOAD_LISTENER_SCRIPT: &str = r#"<script>
 /// Displays cache source information and a log viewer for real-time debugging.
 #[cfg(debug_assertions)]
 pub(crate) const DEBUG_PANEL_SCRIPT: &str = r#"<script>
-(function(){
+(function (){
   var expanded=false;
   var bar=document.createElement('div');
   bar.id='__euv_debug_bar';
@@ -112,7 +118,7 @@ pub(crate) const DEBUG_PANEL_SCRIPT: &str = r#"<script>
       addLog('[panel] source: {{SOURCE}}');
       addLog('[panel] path: {{PATH}}');
     } else {
-      var t=setInterval(function(){
+      var t=setInterval(function (){
         if(window.bridge&&window.bridge.event){
           clearInterval(t);
           window.bridge.event.listen('euv://debug-log',function(e){
@@ -123,7 +129,7 @@ pub(crate) const DEBUG_PANEL_SCRIPT: &str = r#"<script>
           addLog('[panel] path: {{PATH}}');
         }
       },100);
-      setTimeout(function(){clearInterval(t);},10000);
+      setTimeout(function (){clearInterval(t);},10000);
     }
   }
 

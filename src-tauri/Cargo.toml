@@ -9,28 +9,23 @@ name = "euv_lib"
 crate-type = ["cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.6.2", features = [] }
-serde_json = "1"
+serde_json = "1.0.150"
+tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-log = "0.4.32"
+log = "0.4.33"
 http = "1.4.1"
+lombok-macros = "2.0.31"
 percent-encoding = "2.3.2"
 tauri-plugin-log = "2.8.0"
-# Opens external URLs in the system's default browser (Android/desktop).
 tauri-plugin-opener = "2"
-tauri = { version = "2.11.2", features = [] }
+tauri = { version = "2.11.5", features = [] }
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.52.3", features = [
     "time",
     "fs",
 ], default-features = false }
-# NOTE: Pinned to 0.12 on purpose. reqwest 0.13 switched its default TLS
-# certificate verifier to `rustls-platform-verifier`, which panics on Android
-# unless `rustls_platform_verifier::android::init_hosted()` is called via JNI
-# (see seanmonstar/reqwest#2968). The 0.12 `rustls-tls-webpki-roots` feature
-# bundles Mozilla roots into the binary and needs no JNI init.
-reqwest = { version = "0.12", features = [
+reqwest = { version = "=0.12.28", features = [
     "rustls-tls-webpki-roots",
     "gzip",
 ], default-features = false }
@@ -48,7 +43,7 @@ strip = "debuginfo"
 incremental = false
 opt-level = 3
 lto = true
-panic = "abort"
+panic = "unwind"
 debug = false
 codegen-units = 1
 strip = "symbols"

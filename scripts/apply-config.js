@@ -87,7 +87,7 @@ function getLoadingHtml(config) {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>${config.app.name}</title>
-<style>body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:${bg}}
+<style>body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:${bg};}
 .loader{width:48px;height:48px}
 </style>
 </head><body><svg class="loader" viewBox="0 0 50 50" xmlns="http://www.w3.org/2000/svg"><circle cx="25" cy="25" r="20" fill="none" stroke="${trackColor}" stroke-width="4"/><circle cx="25" cy="25" r="20" fill="none" stroke="${spinnerColor}" stroke-width="4" stroke-linecap="round" stroke-dasharray="80 200" stroke-dashoffset="0"><animateTransform attributeName="transform" type="rotate" from="0 25 25" to="360 25 25" dur="1s" repeatCount="indefinite"/></circle></svg></body></html>`;
@@ -112,44 +112,48 @@ function getIndexHtml(config) {
 <html>
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
     <title>${config.app.name}</title>
-    <style>html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:${bg}}</style>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: ${bg};
+      }
+    </style>
   </head>
   <body>
     <script>
-      (function() {
+      (function () {
         function getSchemeUrl(path) {
           var ua = navigator.userAgent || navigator.platform || '';
           return /Win|Android/.test(ua)
             ? 'https://euv.localhost/' + path
             : 'euv://localhost/' + path;
         }
-
-        // Fast adaptive polling: start at a very short interval so the very common
-        // case (bundled cache deployed synchronously during Rust setup) navigates
-        // almost immediately, then back off gradually for the rare offline-fetch path.
         var attempts = 0;
         var navigated = false;
-
         function nextDelay() {
-          // 16ms for the first ~10 tries (~1 frame), then ramp toward 500ms cap.
           if (attempts < 10) return 16;
           if (attempts < 20) return 100;
           return 500;
         }
-
         function navigate() {
           if (navigated) return;
           navigated = true;
           window.location.replace(getSchemeUrl('index.html'));
         }
-
         function pollForCache() {
           if (navigated) return;
           var internals = window.__TAURI_INTERNALS__;
           if (!internals || !internals.invoke) {
-            // Tauri bridge not injected yet; retry on the next frame.
             attempts++;
             setTimeout(pollForCache, nextDelay());
             return;
@@ -163,12 +167,11 @@ function getIndexHtml(config) {
                 setTimeout(pollForCache, nextDelay());
               }
             })
-            .catch(function() {
+            .catch(function () {
               attempts++;
               setTimeout(pollForCache, nextDelay());
             });
         }
-
         pollForCache();
       })();
     </script>
@@ -235,10 +238,7 @@ function writeAndroidConfig(config) {
 
 object AppConfig {
     const val REMOTE_URL = "${config.remote.url}"
-
     const val CACHE_DIR = "${config.cache.directory}"
-    const val MAX_REDIRECTS = ${config.cache.maxRedirects}
-
     const val BACKGROUND_COLOR = "${config.ui.backgroundColor}"
     const val SPLASH_FADE_DURATION_MS = ${config.ui.splashFadeDurationMs}L
     const val SPLASH_MAX_WAIT_MS = ${config.ui.splashMaxWaitMs}L
@@ -246,11 +246,8 @@ object AppConfig {
     const val TRANSPARENT_NAVIGATION_BAR = ${config.ui.transparentNavigationBar ?? false}
     const val ANTI_ALIASING = ${config.ui.antiAliasing ?? false}
     const val MAX_FRAME_RATE_ENABLED = ${config.ui.maxFrameRateEnabled ?? false}
-
     val LOADING_HTML = """${loadingHtmlKt}"""
-
     val INDEX_HTML = """${indexHtmlKt}"""
-
     const val KEEP_ALIVE_SERVICE = ${config.android.keepAliveService}
     const val NOTIFICATION_CHANNEL_ID = "${config.android.notification.channelId}"
     const val NOTIFICATION_CHANNEL_NAME = "${config.android.notification.channelName}"

@@ -447,7 +447,7 @@ class MainActivity : TauriActivity() {
         }
         if (AppConfig.ANTI_ALIASING) {
             webView.evaluateJavascript("""
-                (function() {
+                (function () {
                     var style = document.createElement('style');
                     style.textContent = '
                         * { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
@@ -489,7 +489,7 @@ class MainActivity : TauriActivity() {
 
     private fun injectBridgeScript(webView: WebView) {
         val js = """
-            (function() {
+            (function () {
                 if (window.__euvBridgeInstalled) return;
                 window.__euvBridgeInstalled = true;
                 window.__euvBridgeCallbacks = {};
@@ -563,7 +563,7 @@ class MainActivity : TauriActivity() {
 
     private fun injectExternalLinkInterceptor(webView: WebView) {
         val js = """
-            (function() {
+            (function () {
                 if (window.__externalLinkInterceptorInstalled) return;
                 window.__externalLinkInterceptorInstalled = true;
                 document.addEventListener('click', function(e) {

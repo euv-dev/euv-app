@@ -131,13 +131,7 @@ pub fn run() {
     {
         tauri::android_binding!(com, euv, run, tauri::wry);
     }
-    let _ = HTTP_CLIENT.get_or_init(|| {
-        Client::builder()
-            .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
-            .redirect(Policy::limited(MAX_REDIRECTS))
-            .build()
-            .expect("fatal: failed to build HTTP client")
-    });
+    let _ = shared_client();
     Builder::default()
         // Registered once at the Builder level so it runs for EVERY webview the
         // app owns, including ones created dynamically at runtime. It injects a
@@ -339,17 +333,12 @@ async fn cleanup_old_versions(cache_root: &Path, current: &str) {
 fn shared_client() -> &'static Client {
     HTTP_CLIENT.get_or_init(|| {
         Client::builder()
-            .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
-            .redirect(Policy::limited(MAX_REDIRECTS))
             .build()
             .expect("fatal: failed to build HTTP client")
     })
 }
 
 /// Fetches a URL and returns the response body as bytes.
-///
-/// Enforces a maximum body size limit by checking `Content-Length` header first
-/// to avoid downloading oversized responses.
 ///
 /// # Arguments
 ///
@@ -368,31 +357,15 @@ pub(crate) async fn fetch_url(url: &str) -> Result<Vec<u8>, CacheError> {
     if !response.status().is_success() {
         return Err(CacheError::Fetch(format!("HTTP {}", response.status())));
     }
-    if let Some(content_length) = response.content_length()
-        && content_length as usize > MAX_BODY_SIZE
-    {
-        return Err(CacheError::Fetch(format!(
-            "Too large: {} bytes",
-            content_length
-        )));
-    }
     let bytes: Vec<u8> = response
         .bytes()
         .await
         .map_err(|error: reqwest::Error| CacheError::Fetch(error.to_string()))?
         .to_vec();
-    if bytes.len() > MAX_BODY_SIZE {
-        return Err(CacheError::Fetch(format!(
-            "Too large: {} bytes",
-            bytes.len()
-        )));
-    }
     Ok(bytes)
 }
 
 /// Fetches a URL and returns both the final URL (after redirects) and the response body.
-///
-/// Checks `Content-Length` before downloading to avoid wasting bandwidth on oversized files.
 ///
 /// # Arguments
 ///
@@ -411,26 +384,12 @@ async fn fetch_url_with_final_url(url: &str) -> Result<(String, Vec<u8>), CacheE
     if !response.status().is_success() {
         return Err(CacheError::Fetch(format!("HTTP {}", response.status())));
     }
-    if let Some(content_length) = response.content_length()
-        && content_length as usize > MAX_BODY_SIZE
-    {
-        return Err(CacheError::Fetch(format!(
-            "Too large: {} bytes",
-            content_length
-        )));
-    }
     let final_url: String = response.url().to_string();
     let bytes: Vec<u8> = response
         .bytes()
         .await
         .map_err(|error: reqwest::Error| CacheError::Fetch(error.to_string()))?
         .to_vec();
-    if bytes.len() > MAX_BODY_SIZE {
-        return Err(CacheError::Fetch(format!(
-            "Too large: {} bytes",
-            bytes.len()
-        )));
-    }
     Ok((final_url, bytes))
 }
 
@@ -1416,22 +1375,38 @@ pub(crate) async fn handle_euv_scheme(
 ///
 /// # Returns
 ///
-/// - `Result<String, String>`: The new snapshot name on success, or an error message string.
+/// - `Result<CacheUpdateResult, String>`: On the happy path, a `CacheUpdateResult`
+///   with `success: true` and the freshly minted `new_version_name`. Fetch /
+///   write failures are also surfaced through `Ok(...)` with `success: false`
+///   and a descriptive `message` so the webview can retry without losing the
+///   structured payload. Only Tauri-side panics / programmer errors escape as
+///   `Err(...)`.
 #[tauri::command]
-pub(crate) async fn update_cache(app_handle: AppHandle) -> Result<String, String> {
+pub(crate) async fn update_cache(app_handle: AppHandle) -> Result<CacheUpdateResult, String> {
     let cache_root: PathBuf =
         get_cache_root(&app_handle).map_err(|error: CacheError| error.to_string())?;
-    create_dir_all(&cache_root)
-        .await
-        .map_err(|error: std::io::Error| error.to_string())?;
-    let snapshot: String = fetch_full_snapshot(&cache_root)
-        .await
-        .map_err(|error: CacheError| error.to_string())?;
-    euv_log!(
-        "[EUV] update_cache done (effective next launch): {}",
-        snapshot
-    );
-    Ok(snapshot)
+    match fetch_full_snapshot(&cache_root).await {
+        Ok(snapshot) => {
+            euv_log!(
+                "[EUV] update_cache done (effective next launch): {}",
+                snapshot
+            );
+            Ok(CacheUpdateResult {
+                result: CacheUpdateStatus::Success,
+                data: snapshot,
+                message: "cache updated successfully".to_string(),
+            })
+        }
+        Err(error) => {
+            let error_message: String = error.to_string();
+            euv_log!("[EUV] update_cache failed: {}", error_message);
+            Ok(CacheUpdateResult {
+                result: CacheUpdateStatus::Failed,
+                data: String::new(),
+                message: error_message,
+            })
+        }
+    }
 }
 
 /// Tauri command that returns cached page metadata.
