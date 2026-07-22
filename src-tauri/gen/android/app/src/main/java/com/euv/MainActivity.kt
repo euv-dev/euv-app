@@ -411,6 +411,7 @@ class MainActivity : TauriActivity() {
         Log.d("EUV_CACHE", "onWebViewCreate() at ${System.currentTimeMillis()}")
         super.onWebViewCreate(webView)
         mainWebView = webView
+        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         webView.settings.apply {
             @Suppress("DEPRECATION")
             allowFileAccessFromFileURLs = true
