@@ -131,7 +131,7 @@ pub fn run() {
     {
         tauri::android_binding!(com, euv, run, tauri::wry);
     }
-    let _ = shared_client();
+    let _: &'static Client = shared_client();
     Builder::default()
         // Registered once at the Builder level so it runs for EVERY webview the
         // app owns, including ones created dynamically at runtime. It injects a
@@ -147,7 +147,7 @@ pub fn run() {
             )?;
             let handle: AppHandle = app.handle().clone();
             #[cfg(debug_assertions)]
-            let _ = APP_HANDLE.set(handle.clone());
+            let _: Result<(), AppHandle> = APP_HANDLE.set(handle.clone());
             let setup_handle: AppHandle = handle.clone();
             spawn(async move {
                 deploy_bundled_cache(&setup_handle).await;

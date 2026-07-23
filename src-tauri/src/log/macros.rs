@@ -7,7 +7,7 @@ macro_rules! euv_log {
         {
             if let Some(handle) = $crate::APP_HANDLE.get() {
                 use tauri::Emitter;
-                let _ = handle.emit("euv://debug-log", msg);
+                let _: tauri::Result<()> = handle.emit("euv://debug-log", msg);
             }
         }
     }};
