@@ -99,15 +99,101 @@ const LINK_INTERCEPTOR_SCRIPT: &str = r#"
 })();
 "#;
 
-/// Injects the external-link interceptor into a webview as soon as a page starts
-/// loading. Registered via [`Builder::on_page_load`], so it runs for **every**
-/// webview, including dynamically created ones, on every navigation.
+/// JavaScript injected into **every** webview on each page load to reconcile the
+/// loaded euv page with the app's immersive (edge-to-edge) window.
+///
+/// The app intentionally keeps immersive mode on: the WebView is laid out under
+/// the system status bar, so the page must offset its top chrome by the real
+/// `env(safe-area-inset-top)` value. The script:
+///
+/// 1. Sets `window.__EUV_IMMERSIVE__ = true` so euv-ui (>= 0.18.12) applies the
+///    measured inset to `--euv-mobile-safe-top` itself at app init.
+/// 2. Ensures the document viewport meta contains `viewport-fit=cover`, which is
+///    required for `env(safe-area-inset-*)` to report real insets in the
+///    WebView (the public euv templates ship without it because letterboxed
+///    browsers must not consume the top inset).
+/// 3. Measures `env(safe-area-inset-top)` through a probe element and writes it
+///    to the `--euv-mobile-safe-top` CSS custom property on `<html>`, which
+///    `c_mobile_header` / `c_mobile_nav_drawer` consume for their top padding.
+/// 4. Injects a small compat stylesheet so cached copies of the page built with
+///    euv-ui <= 0.18.11 (whose header does not consume the variable) still get
+///    the correct padding.
+///
+/// It re-runs on `DOMContentLoaded`, `load`, `resize`, and `orientationchange`
+/// so viewport edits made by the page itself and device rotation are handled.
+const IMMERSIVE_SAFE_AREA_SCRIPT: &str = r#"
+(function () {
+  if (window.__euvImmersiveGuard) { return; }
+  window.__euvImmersiveGuard = true;
+  window.__EUV_IMMERSIVE__ = true;
+
+  function ensureCover() {
+    var m = document.querySelector('meta[name="viewport"]');
+    if (!m) {
+      m = document.createElement('meta');
+      m.name = 'viewport';
+      m.content = 'width=device-width, initial-scale=1.0';
+      (document.head || document.documentElement).appendChild(m);
+    }
+    if (!/viewport-fit\s*=\s*cover/.test(m.content)) {
+      m.content = m.content.replace(/\s*$/, '') + ', viewport-fit=cover';
+    }
+  }
+
+  function applyInset() {
+    ensureCover();
+    var probe = document.createElement('div');
+    var s = probe.style;
+    s.position = 'absolute';
+    s.visibility = 'hidden';
+    s.pointerEvents = 'none';
+    s.paddingTop = 'env(safe-area-inset-top, 0px)';
+    (document.body || document.documentElement).appendChild(probe);
+    var top = getComputedStyle(probe).paddingTop;
+    probe.parentNode.removeChild(probe);
+    document.documentElement.style.setProperty('--euv-mobile-safe-top', top);
+  }
+
+  function injectCompat() {
+    if (document.getElementById('euv-immersive-compat')) { return; }
+    var st = document.createElement('style');
+    st.id = 'euv-immersive-compat';
+    st.textContent =
+      '.c_mobile_header{padding-top:var(--euv-mobile-safe-top,0px)!important;' +
+      'height:calc(var(--mobile-header-height,52px) + var(--euv-mobile-safe-top,0px))!important}' +
+      '.c_mobile_nav_drawer{padding-top:var(--euv-mobile-safe-top,0px)!important}';
+    (document.head || document.documentElement).appendChild(st);
+  }
+
+  function boot() {
+    try {
+      applyInset();
+      injectCompat();
+    } catch (_) {}
+  }
+
+  document.addEventListener('DOMContentLoaded', boot);
+  window.addEventListener('load', boot);
+  window.addEventListener('resize', applyInset);
+  window.addEventListener('orientationchange', applyInset);
+  boot();
+})();
+"#;
+
+/// Injects page-level scripts into a webview as soon as a page starts loading.
+/// Registered via [`Builder::on_page_load`], so it runs for **every** webview,
+/// including dynamically created ones, on every navigation.
+///
+/// Currently injects:
+/// - [`LINK_INTERCEPTOR_SCRIPT`] — routes external links to the system browser.
+/// - [`IMMERSIVE_SAFE_AREA_SCRIPT`] — applies the real top safe-area inset so
+///   the immersive WebView's page navbar does not overlap the status bar.
 ///
 /// # Arguments
 ///
 /// - `&Webview`: The webview that is loading a page.
 /// - `&PageLoadPayload`: The page load event payload (used to gate on start).
-fn inject_link_interceptor(webview: &Webview, payload: &PageLoadPayload<'_>) {
+fn inject_page_scripts(webview: &Webview, payload: &PageLoadPayload<'_>) {
     // Inject as early as possible so listeners are registered before user
     // interaction. We inject on the start event of every page load.
     if payload.event() != PageLoadEvent::Started {
@@ -115,6 +201,9 @@ fn inject_link_interceptor(webview: &Webview, payload: &PageLoadPayload<'_>) {
     }
     if let Err(error) = webview.eval(LINK_INTERCEPTOR_SCRIPT) {
         euv_log!("[EUV] failed to inject link interceptor: {}", error);
+    }
+    if let Err(error) = webview.eval(IMMERSIVE_SAFE_AREA_SCRIPT) {
+        euv_log!("[EUV] failed to inject immersive safe-area script: {}", error);
     }
 }
 
@@ -136,8 +225,9 @@ pub fn run() {
         // Registered once at the Builder level so it runs for EVERY webview the
         // app owns, including ones created dynamically at runtime. It injects a
         // script that routes any external link to the system browser instead of
-        // navigating in-app.
-        .on_page_load(inject_link_interceptor)
+        // navigating in-app, plus the immersive safe-area bridge that keeps the
+        // page navbar clear of the system status bar.
+        .on_page_load(inject_page_scripts)
         .plugin(tauri_plugin_opener::init())
         .setup(|app: &mut App| {
             app.handle().plugin(
