@@ -37,6 +37,7 @@ class MainActivity : TauriActivity() {
     private var pendingPermissionCallback: String? = null
     private var pendingPermissionResults: MutableMap<String, Boolean> = mutableMapOf()
     private var pendingPermissionsToRequest: Array<String> = emptyArray()
+    private var lastDispatchedImeBottom: Int = -1
 
     private val multiPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -81,6 +82,11 @@ class MainActivity : TauriActivity() {
             Log.d("EUV_CACHE", "mainFrameLoaded field not found (expected on vanilla Tauri)")
         }
         window.setBackgroundDrawable(ColorDrawable(Color.parseColor(AppConfig.BACKGROUND_COLOR)))
+        // NOTE: do NOT call window.setSoftInputMode(SOFT_INPUT_ADJUST_RESIZE) —
+        // it has no effect in edge-to-edge mode (setDecorFitsSystemWindows(false)).
+        // The IME inset is dispatched manually in onWebViewCreate via
+        // setOnApplyWindowInsetsListener on the WebView itself, where we shrink
+        // its bottomMargin so the focused input scrolls above the keyboard.
         super.onCreate(savedInstanceState)
         addSplashOverlay()
         if (AppConfig.IMMERSIVE_MODE) {
@@ -440,6 +446,89 @@ class MainActivity : TauriActivity() {
             webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         }
         webView.setBackgroundColor(Color.parseColor(AppConfig.BACKGROUND_COLOR))
+        // Edge-to-edge IME bridge. The activity opted into
+        // `setDecorFitsSystemWindows(false)` (see `enableTransparentNavigationBar`),
+        // so the default soft-input path (where the system resizes the WebView
+        // for us) does NOT fire. On API >= R we know the real IME inset and
+        // shrink the WebView's bottomMargin to it, which is the only reliable
+        // way to make `window.visualViewport.height()` reflect the keyboard
+        // (without that, the framework's `on_focus_scroll_into_view` cannot
+        // compute a correct `visible_bottom` and never scrolls the focused
+        // input above the keyboard).
+        //
+        // We also publish the same value as `--euv-keyboard-height` for the
+        // framework's `c_euv_input_wrapper` and the inline-style bridge in
+        // euv-app's `IMMERSIVE_SAFE_AREA_SCRIPT`.
+        //
+        // On API < R there is no IME-aware inset API; in that case we fall back
+        // to the JS-only bridge (visualViewport resize event), which is good
+        // enough for older devices.
+        webView.setOnApplyWindowInsetsListener { _, insets ->
+            val imeBottom: Int =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val compatInsets = WindowInsetsCompat.toWindowInsetsCompat(insets, webView)
+                    val ime = compatInsets.getInsets(WindowInsetsCompat.Type.ime())
+                    val sysBars = compatInsets.getInsets(WindowInsetsCompat.Type.systemBars())
+                    // On API >= R the IME inset already includes the
+                    // navigation bar height when the IME is up, so taking
+                    // max(ime, systemBars) here would double-count. When the
+                    // IME is hidden, ime.bottom is 0 and sysBars.bottom (the
+                    // nav bar) shows through the transparent navigation bar
+                    // background — but the WebView must NOT consume it as a
+                    // margin because that would hide the top safe area. We
+                    // therefore use ime.bottom only.
+                    ime.bottom
+                } else {
+                    0
+                }
+            // Shrink the WebView to leave room for the keyboard. Without this,
+            // `window.visualViewport.height()` stays at full-screen even when
+            // the IME covers the bottom half, and the framework's focus-scroll
+            // logic computes a `visible_bottom` that is >= the input's bottom
+            // edge — so it never scrolls, and the input stays under the
+            // keyboard. This margin is the only signal that actually moves the
+            // layout viewport.
+            val params: ViewGroup.LayoutParams = webView.layoutParams
+            if (params is ViewGroup.MarginLayoutParams) {
+                if (params.bottomMargin != imeBottom) {
+                    params.bottomMargin = imeBottom
+                    webView.layoutParams = params
+                }
+            }
+            // Skip the JS round-trip if the IME height hasn't changed since the
+            // last dispatch — repeated identical values would otherwise force a
+            // CSS var reassignment + style invalidation on every input focus
+            // blur, which visibly shakes the euv example layout.
+            //
+            // The JS value is published in CSS pixels: `ime.bottom` is in the
+            // WebView's physical pixels, while `--euv-keyboard-height` and
+            // `window.__EUV_KEYBOARD_HEIGHT__` are consumed by CSS / page JS.
+            if (imeBottom != lastDispatchedImeBottom) {
+                lastDispatchedImeBottom = imeBottom
+                val density: Float = webView.resources.displayMetrics.density
+                val cssKeyboardHeight: Int =
+                    if (density > 0f) Math.round(imeBottom / density) else imeBottom
+                webView.evaluateJavascript(
+                    "(function(){var px=${cssKeyboardHeight};" +
+                        "document.documentElement.style.setProperty(" +
+                        "'--euv-keyboard-height',px+'px');" +
+                        "window.__EUV_KEYBOARD_HEIGHT__=px;" +
+                        "window.dispatchEvent(new CustomEvent('euv:keyboard-height'," +
+                        "{detail:{height:px}}))})();",
+                    null,
+                )
+            }
+            // IMPORTANT: hand the insets to the WebView's own implementation
+            // instead of returning them raw. Setting this listener REPLACES
+            // WebView.onApplyWindowInsets in the dispatch chain, and Chromium's
+            // implementation is what feeds the system-bar insets into the
+            // page's CSS `env(safe-area-inset-*)` values. Returning `insets`
+            // directly starves the page of insets entirely: env() reads 0px,
+            // every safe-area probe measures 0, and the mobile header glues
+            // itself to the screen top under the status bar. Calling through
+            // keeps CSS env() working while we observe the IME inset.
+            webView.onApplyWindowInsets(insets)
+        }
         webView.webChromeClient = object : WebChromeClient() {
             override fun onConsoleMessage(msg: ConsoleMessage): Boolean {
                 Log.d("JSConsole", "${msg.message()} [line ${msg.lineNumber()}]")
