@@ -115,12 +115,25 @@ const LINK_INTERCEPTOR_SCRIPT: &str = r#"
 /// 3. Measures `env(safe-area-inset-top)` through a probe element and writes it
 ///    to the `--euv-mobile-safe-top` CSS custom property on `<html>`, which
 ///    `c_mobile_header` / `c_mobile_nav_drawer` consume for their top padding.
-/// 4. Injects a small compat stylesheet so cached copies of the page built with
+/// 4. Measures the soft-keyboard inset through `visualViewport`: when the IME
+///    opens, `visualViewport.height` shrinks and the difference against a
+///    baseline window inner height is the keyboard height. The value is
+///    written to `--euv-keyboard-height` on `<html>` and exposed as
+///    `window.__EUV_KEYBOARD_HEIGHT__`. Both are kept in sync with the native
+///    Android IME inset dispatch (`euv:keyboard-height` CustomEvent) when the
+///    native side is available — native values always win because they
+///    include navigation-bar / gesture-area compensation the visualViewport
+///    derivation cannot.
+/// 5. Injects a small compat stylesheet so cached copies of the page built with
 ///    euv-ui <= 0.18.11 (whose header does not consume the variable) still get
-///    the correct padding.
+///    the correct padding, plus a keyboard-bottom helper that pads any element
+///    marked `data-euv-keyboard-aware` so the focused input never sits behind
+///    the soft keyboard even on pages that do not consume
+///    `--euv-keyboard-height` themselves.
 ///
-/// It re-runs on `DOMContentLoaded`, `load`, `resize`, and `orientationchange`
-/// so viewport edits made by the page itself and device rotation are handled.
+/// It re-runs on `DOMContentLoaded`, `load`, `resize`, `orientationchange`,
+/// `focusin`, `focusout`, and `visualViewport.resize` so viewport edits made
+/// by the page itself, device rotation, and IME state changes are handled.
 const IMMERSIVE_SAFE_AREA_SCRIPT: &str = r#"
 (function () {
   if (window.__euvImmersiveGuard) { return; }
@@ -161,8 +174,66 @@ const IMMERSIVE_SAFE_AREA_SCRIPT: &str = r#"
     st.textContent =
       '.c_mobile_header{padding-top:var(--euv-mobile-safe-top,0px)!important;' +
       'height:calc(var(--mobile-header-height,52px) + var(--euv-mobile-safe-top,0px))!important}' +
-      '.c_mobile_nav_drawer{padding-top:var(--euv-mobile-safe-top,0px)!important}';
+      '.c_mobile_nav_drawer{padding-top:var(--euv-mobile-safe-top,0px)!important}' +
+      // Bottom-aware elements (modals, sticky toolbars, fixed bottom bars) opt
+      // in to the keyboard inset by carrying `data-euv-keyboard-aware`. They
+      // receive a transition-aware bottom padding that lifts them above the
+      // soft keyboard without any framework change.
+      '[data-euv-keyboard-aware]{padding-bottom:var(--euv-keyboard-height,0px)!important;' +
+      'transition:padding-bottom 0.18s ease-out}';
     (document.head || document.documentElement).appendChild(st);
+  }
+
+  // Soft-keyboard inset bridge. Tracks visualViewport height against a
+  // baseline window inner height so the page can react to IME show / hide.
+  var baselineHeight = window.innerHeight;
+  function applyKeyboard(h) {
+    var px = (h > 0) ? (h + 'px') : '0px';
+    document.documentElement.style.setProperty('--euv-keyboard-height', px);
+    window.__EUV_KEYBOARD_HEIGHT__ = h;
+  }
+  applyKeyboard(0);
+
+  // Native Android IME dispatch (MainActivity OnApplyWindowInsetsListener) wins
+  // when it has reported anything; visualViewport is the fallback for iOS /
+  // desktop / older Android builds where the native bridge is absent.
+  window.addEventListener('euv:keyboard-height', function (e) {
+    var h = (e && e.detail && typeof e.detail.height === 'number')
+      ? e.detail.height : 0;
+    if (h > 0) {
+      baselineHeight = window.innerHeight;
+    }
+    applyKeyboard(h);
+  });
+
+  if (window.visualViewport) {
+    var vv = window.visualViewport;
+    function fromViewport() {
+      if (typeof window.__EUV_KEYBOARD_HEIGHT__ === 'number'
+          && window.__EUV_KEYBOARD_HEIGHT__ > 0) {
+        // Native has authoritative value; do not override.
+        baselineHeight = window.innerHeight;
+        return;
+      }
+      var kb = Math.max(0, baselineHeight - vv.height - vv.offsetTop);
+      applyKeyboard(Math.round(kb));
+    }
+    vv.addEventListener('resize', fromViewport);
+    window.addEventListener('focusin', function () {
+      baselineHeight = window.innerHeight;
+      setTimeout(fromViewport, 0);
+    });
+    window.addEventListener('focusout', function () {
+      if (typeof window.__EUV_KEYBOARD_HEIGHT__ !== 'number'
+          || window.__EUV_KEYBOARD_HEIGHT__ === 0) {
+        applyKeyboard(0);
+      }
+    });
+  }
+
+  // Honor any push from native that arrived before this script ran.
+  if (typeof window.__euvInitialKeyboardHeight === 'number') {
+    applyKeyboard(window.__euvInitialKeyboardHeight);
   }
 
   function boot() {
