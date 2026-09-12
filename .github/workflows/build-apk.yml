@@ -46,7 +46,14 @@ jobs:
           key: sdk-${{ runner.os }}-${{ hashFiles('scripts/setup-sdk.sh') }}
 
       - name: Build APK
-        run: ./build.sh android release
+        run: |
+          echo "--- pre-flight ---"
+          rustup target list --installed; echo "rustup-list-rc=$?"
+          echo "--- trace ---"
+          bash -x ./build.sh android release 2>&1 | tail -60
+          rc=${PIPESTATUS[0]}
+          echo "build-rc=$rc"
+          exit "$rc"
 
       # Publish only on master pushes / manual runs — never on PRs.
       - name: Move rolling `latest` tag to this commit
