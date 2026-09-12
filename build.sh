@@ -63,11 +63,44 @@ esac
 
 command -v cargo >/dev/null 2>&1 || error "cargo not found, please install Rust toolchain"
 
+# Fresh-clone bootstrap: `tauri android build` compiles libeuv_lib.so per
+# ABI, but rustup only installs the host target by default. Add the Android
+# targets here — `rustup target add` is idempotent and skips installed ones.
+if command -v rustup >/dev/null 2>&1; then
+    ANDROID_RUST_TARGETS=(aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android)
+    INSTALLED_TARGETS=$(rustup target list --installed)
+    MISSING_TARGETS=()
+    for TARGET in "${ANDROID_RUST_TARGETS[@]}"; do
+        if ! grep -qx "$TARGET" <<< "$INSTALLED_TARGETS"; then
+            MISSING_TARGETS+=("$TARGET")
+        fi
+    done
+    if [ "${#MISSING_TARGETS[@]}" -gt 0 ]; then
+        step "Installing missing Rust Android targets: ${MISSING_TARGETS[*]}"
+        rustup target add "${MISSING_TARGETS[@]}"
+    fi
+fi
+
 if [ -f "$HOME/.nvm/nvm.sh" ]; then
     source "$HOME/.nvm/nvm.sh"
     nvm use 20 --silent 2>/dev/null || nvm use node --silent
 fi
 command -v npx >/dev/null 2>&1 || error "npx not found, please install Node.js"
+
+# Fresh-clone bootstrap: install npm dependencies once. Without
+# node_modules, `npx @tauri-apps/cli` re-downloads the CLI on every build
+# and may silently resolve a different version.
+if [ ! -d "$PROJECT_ROOT/node_modules" ]; then
+    step "node_modules not found, installing npm dependencies..."
+    if [ -f "$PROJECT_ROOT/package-lock.json" ]; then
+        # `npm ci` is deterministic, but older lockfiles miss the CLI's
+        # platform-specific optional deps and abort with EUSAGE — fall
+        # back to a regular install in that case.
+        npm ci || npm install
+    else
+        npm install
+    fi
+fi
 
 step "Applying config to platform files..."
 node scripts/apply-config.js
@@ -124,8 +157,16 @@ BUILD_START=$(date +%s)
 GENERATED_DIR="src-tauri/gen/android/app/src/main/java/com/euv/generated"
 BACKUP_FILE="/tmp/euv_RustWebViewClient_backup.kt"
 BACKUP_FILE_WV="/tmp/euv_RustWebView_backup.kt"
-cp "$GENERATED_DIR/RustWebViewClient.kt" "$BACKUP_FILE"
-cp "$GENERATED_DIR/RustWebView.kt" "$BACKUP_FILE_WV"
+# These two files carry local customizations and are committed to git, but
+# Tauri regenerates `generated/` on every build — back them up so we can
+# restore them afterwards. Guards keep a fresh clone (where the files exist
+# in git) and any legacy checkout (where they may not) both working.
+if [ -f "$GENERATED_DIR/RustWebViewClient.kt" ]; then
+    cp "$GENERATED_DIR/RustWebViewClient.kt" "$BACKUP_FILE"
+fi
+if [ -f "$GENERATED_DIR/RustWebView.kt" ]; then
+    cp "$GENERATED_DIR/RustWebView.kt" "$BACKUP_FILE_WV"
+fi
 
 if [ "$MODE" = "release" ]; then
     npx @tauri-apps/cli android build --apk 2>&1 || true
@@ -133,8 +174,12 @@ else
     npx @tauri-apps/cli android build --apk --debug 2>&1 || true
 fi
 
-cp "$BACKUP_FILE" "$GENERATED_DIR/RustWebViewClient.kt"
-cp "$BACKUP_FILE_WV" "$GENERATED_DIR/RustWebView.kt"
+if [ -f "$BACKUP_FILE" ]; then
+    cp "$BACKUP_FILE" "$GENERATED_DIR/RustWebViewClient.kt"
+fi
+if [ -f "$BACKUP_FILE_WV" ]; then
+    cp "$BACKUP_FILE_WV" "$GENERATED_DIR/RustWebView.kt"
+fi
 info "Restored custom RustWebViewClient.kt and RustWebView.kt"
 
 LIB_NAME="libeuv_lib.so"

@@ -9,12 +9,12 @@
 
 "@tauri-apps/cli-darwin-arm64@2.11.2":
   "integrity" "sha1-YGaATQZVan99oG/FmRrYdnITQ48="
-  "resolved" "http://r.npm.sankuai.com/@tauri-apps/cli-darwin-arm64/download/@tauri-apps/cli-darwin-arm64-2.11.2.tgz"
+  "resolved" "https://registry.npmjs.org/@tauri-apps/cli-darwin-arm64/-/cli-darwin-arm64-2.11.2.tgz"
   "version" "2.11.2"
 
 "@tauri-apps/cli@^2.11.2":
   "integrity" "sha1-HhoRImPIoASirsukh09CF1c+dO8="
-  "resolved" "http://r.npm.sankuai.com/@tauri-apps/cli/download/@tauri-apps/cli-2.11.2.tgz"
+  "resolved" "https://registry.npmjs.org/@tauri-apps/cli/-/cli-2.11.2.tgz"
   "version" "2.11.2"
   optionalDependencies:
     "@tauri-apps/cli-darwin-arm64" "2.11.2"
