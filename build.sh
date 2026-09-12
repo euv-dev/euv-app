@@ -63,11 +63,41 @@ esac
 
 command -v cargo >/dev/null 2>&1 || error "cargo not found, please install Rust toolchain"
 
+# Fresh-clone bootstrap: `tauri android build` compiles libeuv_lib.so per
+# ABI, but rustup only installs the host target by default. Add the Android
+# targets here — `rustup target add` is idempotent and skips installed ones.
+if command -v rustup >/dev/null 2>&1; then
+    ANDROID_RUST_TARGETS=(aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android)
+    INSTALLED_TARGETS=$(rustup target list --installed)
+    MISSING_TARGETS=()
+    for TARGET in "${ANDROID_RUST_TARGETS[@]}"; do
+        if ! grep -qx "$TARGET" <<< "$INSTALLED_TARGETS"; then
+            MISSING_TARGETS+=("$TARGET")
+        fi
+    done
+    if [ "${#MISSING_TARGETS[@]}" -gt 0 ]; then
+        step "Installing missing Rust Android targets: ${MISSING_TARGETS[*]}"
+        rustup target add "${MISSING_TARGETS[@]}"
+    fi
+fi
+
 if [ -f "$HOME/.nvm/nvm.sh" ]; then
     source "$HOME/.nvm/nvm.sh"
     nvm use 20 --silent 2>/dev/null || nvm use node --silent
 fi
 command -v npx >/dev/null 2>&1 || error "npx not found, please install Node.js"
+
+# Fresh-clone bootstrap: install npm dependencies once. Without
+# node_modules, `npx @tauri-apps/cli` re-downloads the CLI on every build
+# and may silently resolve a different version.
+if [ ! -d "$PROJECT_ROOT/node_modules" ]; then
+    step "node_modules not found, installing npm dependencies..."
+    if [ -f "$PROJECT_ROOT/package-lock.json" ]; then
+        npm ci
+    else
+        npm install
+    fi
+fi
 
 step "Applying config to platform files..."
 node scripts/apply-config.js

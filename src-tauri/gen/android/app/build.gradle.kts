@@ -30,6 +30,14 @@ android {
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+        // Limit shipped ABIs to arm64-v8a only — universal APKs that bundle
+        // every .so per arch produce 40+ MB binaries that exceed download-size
+        // limits on Android <8 and slow down updates. Modern phones (Android 7+
+        // released after 2017) are all arm64; x86_64 / x86 / armv7 are kept
+        // only for emulator / debug builds.
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
     signingConfigs {
         create("release") {
@@ -37,6 +45,13 @@ android {
             storePassword = "euv123456"
             keyAlias = "euv"
             keyPassword = "euv123456"
+            // Enable v1 + v2 + v3 so the APK installs on every Android version
+            // from 7.0 onwards. The previous build silently produced v2/v3-only
+            // signatures whose .SF/.RSA files were never written, which broke
+            // sideloading and older package installers.
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
         }
     }
     buildTypes {
@@ -46,10 +61,8 @@ android {
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false
-            packaging {                jniLibs.keepDebugSymbols.add("*/arm64-v8a/*.so")
-                jniLibs.keepDebugSymbols.add("*/armeabi-v7a/*.so")
-                jniLibs.keepDebugSymbols.add("*/x86/*.so")
-                jniLibs.keepDebugSymbols.add("*/x86_64/*.so")
+            packaging {
+                jniLibs.keepDebugSymbols.add("*/arm64-v8a/*.so")
             }
         }
         getByName("release") {

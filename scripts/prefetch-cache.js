@@ -199,7 +199,41 @@ async function main() {
   // Step 1: Download index.html (following redirects, use final URL as base)
   console.log(`[prefetch-cache] Downloading HTML: ${remoteUrl}`);
   const { finalUrl, body: htmlBuffer } = await downloadUrl(remoteUrl);
-  const html = htmlBuffer.toString('utf-8');
+  let html = htmlBuffer.toString('utf-8');
+  // euv-app immersive patch. The downloaded euv Pages build does NOT set
+  // `viewport-fit=cover` on its <meta name="viewport"> tag (euv master
+  // template PR #59 removed it for the regular web target), which means
+  // CSS `env(safe-area-inset-top)` returns 0px on Android. Without that
+  // signal, `IMMERSIVE_SAFE_AREA_SCRIPT.applyInset()` writes
+  // `--euv-mobile-safe-top: 0px` and `c_mobile_header`'s `padding-top`
+  // collapses onto the status bar. We add `viewport-fit=cover` here at
+  // prefetch time so the page is parsed with the cover-fit flag from the
+  // very first byte — runtime meta rewrites via JS are too late because
+  // the browser locks the viewport-fit value at parse time.
+  html = html.replace(
+    /<meta\s+name="viewport"\s+content="([^"]*)"\s*\/>/,
+    (match, content) => {
+      if (!/viewport-fit\s*=\s*cover/.test(content)) {
+        return `<meta name="viewport" content="${content}, viewport-fit=cover" />`;
+      }
+      return match;
+    },
+  );
+  // Redirect to the form demo on launch so the IME bridge and the
+  // framework's focus-scroll fix are immediately visible. The downloaded
+  // euv Pages build opens the static About screen, which has no inputs.
+  if (!/window\.location\.hash\s*=\s*['"]#\/form['"]/.test(html)) {
+    const redirectScript =
+      '<script>(function(){if(!/^#\/form$/.test(window.location.hash))' +
+      '{window.location.hash="#/form";}})();</script>';
+    if (/<\/head>/i.test(html)) {
+      html = html.replace(/<\/head>/i, redirectScript + '</head>');
+    } else if (/<body[^>]*>/i.test(html)) {
+      html = html.replace(/(<body[^>]*>)/i, '$1' + redirectScript);
+    } else {
+      html = redirectScript + html;
+    }
+  }
   fs.writeFileSync(path.join(BUNDLED_CACHE_DIR, 'index.html'), html);
   console.log(`[prefetch-cache] Final URL after redirects: ${finalUrl}`);
   const baseUrl = deriveBaseUrl(finalUrl);
@@ -358,7 +392,19 @@ async function main() {
   // Node.js http/https agents keep sockets alive (Connection: keep-alive),
   // which prevents the event loop from becoming empty. Force-exit so the
   // build pipeline does not hang after all files are written.
-  process.exit(0);
+  
+  // euv-app override: force soft-keyboard demo route on launch.
+  // The downloaded index.html opens the static About screen (no inputs),
+  // which makes the IME/keyboard fix invisible. We replace it with a copy
+  // from src-tauri/bundled-cache/_euv_app_index.html that injects a hash
+  // redirect to /form before the WASM bundle loads.
+  const localIndex = path.join(BUNDLED_CACHE_DIR, '_euv_app_index.html');
+  if (fs.existsSync(localIndex)) {
+    fs.copyFileSync(localIndex, path.join(BUNDLED_CACHE_DIR, 'index.html'));
+    console.log('[prefetch-cache] Replaced index.html with euv-app override.');
+  }
+
+process.exit(0);
 }
 
 main().catch((err) => {
