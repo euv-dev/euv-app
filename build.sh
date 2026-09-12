@@ -93,7 +93,10 @@ command -v npx >/dev/null 2>&1 || error "npx not found, please install Node.js"
 if [ ! -d "$PROJECT_ROOT/node_modules" ]; then
     step "node_modules not found, installing npm dependencies..."
     if [ -f "$PROJECT_ROOT/package-lock.json" ]; then
-        npm ci
+        # `npm ci` is deterministic, but older lockfiles miss the CLI's
+        # platform-specific optional deps and abort with EUSAGE — fall
+        # back to a regular install in that case.
+        npm ci || npm install
     else
         npm install
     fi
