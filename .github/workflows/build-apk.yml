@@ -28,6 +28,14 @@ jobs:
         with:
           node-version: 20
 
+      # The runner image's preinstalled rustup fails `rustup target add`
+      # with a silent exit 3 — install a fresh stable toolchain with the
+      # Android targets instead (build.sh's own rustup add then no-ops).
+      - name: Install Rust with Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
+
       # build.sh self-bootstraps everything else: rustup Android targets,
       # npm ci, JDK + Android SDK/NDK into sdk/ (via scripts/setup-sdk.sh),
       # and the page prefetch (Tauri beforeBuildCommand).
