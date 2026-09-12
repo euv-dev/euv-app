@@ -81,9 +81,13 @@ if command -v rustup >/dev/null 2>&1; then
     fi
 fi
 
+# Best-effort nvm: images like GitHub-hosted runners ship nvm with NO
+# installed node versions, where `nvm use` exits 3 and (with --silent)
+# kills the script with no message. Never let nvm abort the build — the
+# real gate is the npx check below (setup-node/PATH-provided node is fine).
 if [ -f "$HOME/.nvm/nvm.sh" ]; then
     source "$HOME/.nvm/nvm.sh"
-    nvm use 20 --silent 2>/dev/null || nvm use node --silent
+    nvm use 20 --silent 2>/dev/null || nvm use node --silent 2>/dev/null || true
 fi
 command -v npx >/dev/null 2>&1 || error "npx not found, please install Node.js"
 
