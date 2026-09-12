@@ -157,8 +157,16 @@ BUILD_START=$(date +%s)
 GENERATED_DIR="src-tauri/gen/android/app/src/main/java/com/euv/generated"
 BACKUP_FILE="/tmp/euv_RustWebViewClient_backup.kt"
 BACKUP_FILE_WV="/tmp/euv_RustWebView_backup.kt"
-cp "$GENERATED_DIR/RustWebViewClient.kt" "$BACKUP_FILE"
-cp "$GENERATED_DIR/RustWebView.kt" "$BACKUP_FILE_WV"
+# These two files carry local customizations and are committed to git, but
+# Tauri regenerates `generated/` on every build — back them up so we can
+# restore them afterwards. Guards keep a fresh clone (where the files exist
+# in git) and any legacy checkout (where they may not) both working.
+if [ -f "$GENERATED_DIR/RustWebViewClient.kt" ]; then
+    cp "$GENERATED_DIR/RustWebViewClient.kt" "$BACKUP_FILE"
+fi
+if [ -f "$GENERATED_DIR/RustWebView.kt" ]; then
+    cp "$GENERATED_DIR/RustWebView.kt" "$BACKUP_FILE_WV"
+fi
 
 if [ "$MODE" = "release" ]; then
     npx @tauri-apps/cli android build --apk 2>&1 || true
@@ -166,8 +174,12 @@ else
     npx @tauri-apps/cli android build --apk --debug 2>&1 || true
 fi
 
-cp "$BACKUP_FILE" "$GENERATED_DIR/RustWebViewClient.kt"
-cp "$BACKUP_FILE_WV" "$GENERATED_DIR/RustWebView.kt"
+if [ -f "$BACKUP_FILE" ]; then
+    cp "$BACKUP_FILE" "$GENERATED_DIR/RustWebViewClient.kt"
+fi
+if [ -f "$BACKUP_FILE_WV" ]; then
+    cp "$BACKUP_FILE_WV" "$GENERATED_DIR/RustWebView.kt"
+fi
 info "Restored custom RustWebViewClient.kt and RustWebView.kt"
 
 LIB_NAME="libeuv_lib.so"
