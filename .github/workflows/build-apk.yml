@@ -45,6 +45,16 @@ jobs:
           path: sdk
           key: sdk-${{ runner.os }}-${{ hashFiles('scripts/setup-sdk.sh') }}
 
+      - name: Cache cargo registry + rust target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
       - name: Build APK
         run: ./build.sh android release
 
@@ -63,7 +73,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TITLE="Latest APK (build ${{ github.run_number }})"
-          NOTES="Automatic build from commit ${{ github.sha }} (`$(date -u +%Y-%m-%d\ %H:%M)` UTC)."
+          NOTES="Automatic build from commit ${{ github.sha }} ($(date -u '+%Y-%m-%d %H:%M') UTC)."
           gh release create latest --title "$TITLE" --notes "$NOTES" --prerelease 2>/dev/null \
             || gh release edit latest --title "$TITLE" --notes "$NOTES" --prerelease
           gh release upload latest euv.apk --clobber
