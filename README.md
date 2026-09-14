@@ -4,7 +4,6 @@
 
 <img src="https://ltpp.vip/github/pages/docs-pages/pages/img/euv.png" alt="" height="160">
 
-[![](https://github.com/euv-dev/euv-app/workflows/Build%20APK/badge.svg)](https://github.com/euv-dev/euv-app/actions?query=workflow:Build+APK)
 [![](https://img.shields.io/github/release/euv-dev/euv-app/latest.svg)](https://github.com/euv-dev/euv-app/releases/latest)
 [![](https://img.shields.io/crates/l/euv.svg)](./LICENSE)
 
