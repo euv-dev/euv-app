@@ -52,6 +52,41 @@ pub(crate) const RELOAD_LISTENER_SCRIPT: &str = r#"<script>
 })();
 </script>"#;
 
+/// URL scheme prefix for `http://` absolute URLs — skipped during resource discovery.
+pub(crate) const HTTP_PREFIX: &str = "http://";
+
+/// URL scheme prefix for `https://` absolute URLs — skipped during resource discovery.
+pub(crate) const HTTPS_PREFIX: &str = "https://";
+
+/// Inline-data URL prefix (`data:image/png;base64,...`) — skipped during resource discovery.
+pub(crate) const DATA_PREFIX: &str = "data:";
+
+/// Protocol-relative URL prefix (`//cdn.example.com/x.js`) — skipped during resource discovery.
+pub(crate) const SCHEME_RELATIVE: &str = "//";
+
+/// Authority separator embedded in absolute URLs (`https://host/path`) — any string containing
+/// this is treated as absolute and skipped during resource discovery.
+pub(crate) const SCHEME_SEPARATOR: &str = "://";
+
+/// CSS selector that matches external `<script src="...">` tags.
+pub(crate) const SCRIPT_SRC_SELECTOR: &str = "script[src]";
+
+/// CSS selector that matches `<link href="...">` tags (stylesheets, favicons, preloads).
+pub(crate) const LINK_HREF_SELECTOR: &str = "link[href]";
+
+/// CSS selector that matches `<img src="...">` tags.
+pub(crate) const IMG_SRC_SELECTOR: &str = "img[src]";
+
+/// CSS selector that matches inline `<script>` (no `src` attribute) tags whose body should
+/// be fed to the JS parser for AST-level resource extraction.
+pub(crate) const INLINE_SCRIPT_SELECTOR: &str = "script:not([src])";
+
+/// File-extension suffixes that identify a string literal as a local resource path to cache.
+pub(crate) const RESOURCE_EXTENSIONS: &[&str] = &[
+    ".wasm", ".js", ".mjs", ".css", ".json", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+    ".woff", ".woff2", ".ttf", ".otf", ".webp",
+];
+
 /// Debug panel HTML snippet injected into index.html in debug builds.
 ///
 /// Displays cache source information and a log viewer for real-time debugging.

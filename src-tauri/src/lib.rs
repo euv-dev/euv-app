@@ -21,10 +21,13 @@ pub(crate) use std::{
 pub(crate) use {
     lombok_macros::*,
     reqwest::Client,
-    scraper::{Html, Selector},
+    scraper::{Html, Selector, selector::SelectorErrorKind},
     serde::{Serialize, Serializer},
-    swc_common::{SourceMap, comments::SingleThreadedComments},
-    swc_ecma_ast::{EsVersion, Program},
+    swc_common::{FileName, SourceMap, comments::SingleThreadedComments},
+    swc_ecma_ast::{
+        ArrowFunctionBody, Callee, Decl, EsVersion, Expr, Lit, MemberProp, ModuleDecl, ModuleItem,
+        Program, Prop, PropOrSpread, Stmt, VarDeclOrExpr,
+    },
     swc_ecma_parser::{Syntax, parse_file_as_program},
     tauri::{
         App, AppHandle, Builder, Manager, RunEvent, UriSchemeResponder, Webview,
