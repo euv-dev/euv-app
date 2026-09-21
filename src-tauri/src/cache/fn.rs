@@ -1301,12 +1301,12 @@ fn extract_resources_from_expr(expr: &swc_ecma_ast::Expr, results: &mut Vec<Stri
             }
         }
         swc_ecma_ast::Expr::Arrow(arrow) => match &*arrow.body {
-            swc_ecma_ast::BlockStmtOrExpr::BlockStmt(block) => {
+            swc_ecma_ast::ArrowFunctionBody::FunctionBody(block) => {
                 for stmt in &block.stmts {
                     extract_resources_from_stmt(stmt, results);
                 }
             }
-            swc_ecma_ast::BlockStmtOrExpr::Expr(expr) => {
+            swc_ecma_ast::ArrowFunctionBody::Expr(expr) => {
                 extract_resources_from_expr(expr, results);
             }
         },
