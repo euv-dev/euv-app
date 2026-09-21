@@ -111,6 +111,15 @@ function extractResourcePaths(html) {
   while ((m = importPattern.exec(html)) !== null) {
     paths.push(m[1]);
   }
+  // IIFE inline-bridge format (euv PR #250): no external script/link tags,
+  // but the inline JS sets `var __euv_wasm_url = "pkg/<name>_bg.wasm"`.
+  const iifeWasmPattern = /__euv_wasm_url\s*=\s*["']([^"']+\.wasm)["']/g;
+  while ((m = iifeWasmPattern.exec(html)) !== null) {
+    const val = m[1];
+    if (!val.includes('://')) {
+      paths.push(val);
+    }
+  }
   return [...new Set(paths)];
 }
 
