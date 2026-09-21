@@ -1,13 +1,15 @@
 name: Build APK
 
 # Every code change on master rebuilds the APK and publishes it to the
-# rolling `latest` GitHub Release. PRs build too, but only master pushes
-# publish. Manual runs via workflow_dispatch also publish.
+# rolling `latest` GitHub Release. PRs and merge-queue batches build too,
+# but only direct pushes to master publish. Manual runs via workflow_dispatch
+# also publish.
 on:
   push:
     branches: [master]
   pull_request:
     branches: [master]
+  merge_group:
   workflow_dispatch:
 
 concurrency:
