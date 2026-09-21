@@ -21,7 +21,7 @@ pub(crate) use std::{
 pub(crate) use {
     lombok_macros::*,
     reqwest::Client,
-    scraper::{Html, Selector, selector::SelectorErrorKind},
+    scraper::{Html, Selector},
     serde::{Serialize, Serializer},
     swc_common::{FileName, SourceMap, comments::SingleThreadedComments},
     swc_ecma_ast::{

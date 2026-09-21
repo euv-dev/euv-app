@@ -1156,10 +1156,10 @@ async fn fetch_resource_list(paths: &[String], base_url: &str, version_dir: &Pat
 /// avoid `unwrap` / `expect` per rust-standards §R11.4.
 fn init_resource_selectors() -> Result<[Selector; 4], String> {
     Ok([
-        Selector::parse(SCRIPT_SRC_SELECTOR).map_err(|e: SelectorErrorKind| e.to_string())?,
-        Selector::parse(LINK_HREF_SELECTOR).map_err(|e: SelectorErrorKind| e.to_string())?,
-        Selector::parse(IMG_SRC_SELECTOR).map_err(|e: SelectorErrorKind| e.to_string())?,
-        Selector::parse(INLINE_SCRIPT_SELECTOR).map_err(|e: SelectorErrorKind| e.to_string())?,
+        Selector::parse(SCRIPT_SRC_SELECTOR).map_err(|e| e.to_string())?,
+        Selector::parse(LINK_HREF_SELECTOR).map_err(|e| e.to_string())?,
+        Selector::parse(IMG_SRC_SELECTOR).map_err(|e| e.to_string())?,
+        Selector::parse(INLINE_SCRIPT_SELECTOR).map_err(|e| e.to_string())?,
     ])
 }
 
