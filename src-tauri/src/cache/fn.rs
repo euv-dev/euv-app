@@ -1148,6 +1148,31 @@ async fn fetch_resource_list(paths: &[String], base_url: &str, version_dir: &Pat
     results
 }
 
+/// Lazily initializes the cached `scraper::Selector` instances used by
+/// `extract_resources_with_scraper`.
+///
+/// All four selector strings are compile-time constants, so the inner `Result`
+/// is `Ok` in practice. The `Result` wrapper exists so the initializer can
+/// avoid `unwrap` / `expect` per rust-standards §R11.4.
+fn init_resource_selectors() -> Result<[Selector; 4], String> {
+    Ok([
+        Selector::parse(SCRIPT_SRC_SELECTOR).map_err(|e: SelectorErrorKind| e.to_string())?,
+        Selector::parse(LINK_HREF_SELECTOR).map_err(|e: SelectorErrorKind| e.to_string())?,
+        Selector::parse(IMG_SRC_SELECTOR).map_err(|e: SelectorErrorKind| e.to_string())?,
+        Selector::parse(INLINE_SCRIPT_SELECTOR).map_err(|e: SelectorErrorKind| e.to_string())?,
+    ])
+}
+
+/// Returns true if the URL points to a non-cacheable resource (absolute URL,
+/// protocol-relative URL, or inline data URI) and should be skipped during
+/// resource discovery.
+fn is_external_resource_url(url: &str) -> bool {
+    url.starts_with(HTTP_PREFIX)
+        || url.starts_with(HTTPS_PREFIX)
+        || url.starts_with(SCHEME_RELATIVE)
+        || url.starts_with(DATA_PREFIX)
+}
+
 /// Extracts resource paths from HTML using the scraper HTML parser.
 ///
 /// Parses `<script src>`, `<link href>`, and `<img src>` tags to discover
@@ -1164,48 +1189,40 @@ fn extract_resources_with_scraper(
     paths: &mut Vec<String>,
     inline_scripts: &mut Vec<String>,
 ) {
+    let selectors: [Selector; 4] = match RESOURCE_SELECTORS.get_or_init(init_resource_selectors) {
+        Ok(s) => s.clone(),
+        Err(error) => {
+            euv_log!("[EUV] failed to compile resource selectors: {}", error);
+            return;
+        }
+    };
     let document: Html = Html::parse_document(html);
-    let script_selector: Selector = Selector::parse("script[src]").unwrap();
-    let link_selector: Selector = Selector::parse("link[href]").unwrap();
-    let img_selector: Selector = Selector::parse("img[src]").unwrap();
-    let inline_script_selector: Selector = Selector::parse("script:not([src])").unwrap();
-    for element in document.select(&script_selector) {
+    let script_selector: &Selector = &selectors[0];
+    let link_selector: &Selector = &selectors[1];
+    let img_selector: &Selector = &selectors[2];
+    let inline_script_selector: &Selector = &selectors[3];
+    for element in document.select(script_selector) {
         if let Some(src) = element.value().attr("src") {
-            if !src.starts_with("http://")
-                && !src.starts_with("https://")
-                && !src.starts_with("//")
-                && !src.starts_with("data:")
-                && !paths.contains(&src.to_string())
-            {
+            if !is_external_resource_url(src) && !paths.contains(&src.to_string()) {
                 paths.push(src.to_string());
             }
         }
     }
-    for element in document.select(&link_selector) {
+    for element in document.select(link_selector) {
         if let Some(href) = element.value().attr("href") {
-            if !href.starts_with("http://")
-                && !href.starts_with("https://")
-                && !href.starts_with("//")
-                && !href.starts_with("data:")
-                && !paths.contains(&href.to_string())
-            {
+            if !is_external_resource_url(href) && !paths.contains(&href.to_string()) {
                 paths.push(href.to_string());
             }
         }
     }
-    for element in document.select(&img_selector) {
+    for element in document.select(img_selector) {
         if let Some(src) = element.value().attr("src") {
-            if !src.starts_with("http://")
-                && !src.starts_with("https://")
-                && !src.starts_with("//")
-                && !src.starts_with("data:")
-                && !paths.contains(&src.to_string())
-            {
+            if !is_external_resource_url(src) && !paths.contains(&src.to_string()) {
                 paths.push(src.to_string());
             }
         }
     }
-    for element in document.select(&inline_script_selector) {
+    for element in document.select(inline_script_selector) {
         let script_content: String = element.text().collect::<String>();
         if !script_content.trim().is_empty() {
             inline_scripts.push(script_content);
@@ -1218,27 +1235,27 @@ fn extract_resources_with_scraper(
 ///
 /// # Arguments
 ///
-/// - `&swc_ecma_ast::Expr`: The expression to walk.
+/// - `&Expr`: The expression to walk.
 /// - `&mut Vec<String>`: The collection to append discovered resource paths to.
-fn extract_resources_from_expr(expr: &swc_ecma_ast::Expr, results: &mut Vec<String>) {
+fn extract_resources_from_expr(expr: &Expr, results: &mut Vec<String>) {
     match expr {
-        swc_ecma_ast::Expr::Lit(lit) => {
-            if let swc_ecma_ast::Lit::Str(str_lit) = lit {
+        Expr::Lit(lit) => {
+            if let Lit::Str(str_lit) = lit {
                 let value: String = str_lit.value.to_string_lossy().into_owned();
                 if is_resource_path(&value) && !results.contains(&value) {
                     results.push(value);
                 }
             }
         }
-        swc_ecma_ast::Expr::Call(call) => {
+        Expr::Call(call) => {
             for arg in &call.args {
                 extract_resources_from_expr(&arg.expr, results);
             }
-            if let swc_ecma_ast::Callee::Expr(callee_expr) = &call.callee {
+            if let Callee::Expr(callee_expr) = &call.callee {
                 extract_resources_from_expr(callee_expr, results);
             }
         }
-        swc_ecma_ast::Expr::New(new_expr) => {
+        Expr::New(new_expr) => {
             if let Some(args) = &new_expr.args {
                 for arg in args {
                     extract_resources_from_expr(&arg.expr, results);
@@ -1246,89 +1263,89 @@ fn extract_resources_from_expr(expr: &swc_ecma_ast::Expr, results: &mut Vec<Stri
             }
             extract_resources_from_expr(&new_expr.callee, results);
         }
-        swc_ecma_ast::Expr::Member(member) => {
+        Expr::Member(member) => {
             extract_resources_from_expr(&member.obj, results);
-            if let swc_ecma_ast::MemberProp::Computed(computed) = &member.prop {
+            if let MemberProp::Computed(computed) = &member.prop {
                 extract_resources_from_expr(&computed.expr, results);
             }
         }
-        swc_ecma_ast::Expr::Bin(bin) => {
+        Expr::Bin(bin) => {
             extract_resources_from_expr(&bin.left, results);
             extract_resources_from_expr(&bin.right, results);
         }
-        swc_ecma_ast::Expr::Unary(unary) => {
+        Expr::Unary(unary) => {
             extract_resources_from_expr(&unary.arg, results);
         }
-        swc_ecma_ast::Expr::Paren(paren) => {
+        Expr::Paren(paren) => {
             extract_resources_from_expr(&paren.expr, results);
         }
-        swc_ecma_ast::Expr::Tpl(tpl) => {
+        Expr::Tpl(tpl) => {
             for expr in &tpl.exprs {
                 extract_resources_from_expr(expr, results);
             }
         }
-        swc_ecma_ast::Expr::Cond(cond) => {
+        Expr::Cond(cond) => {
             extract_resources_from_expr(&cond.test, results);
             extract_resources_from_expr(&cond.cons, results);
             extract_resources_from_expr(&cond.alt, results);
         }
-        swc_ecma_ast::Expr::Seq(seq) => {
+        Expr::Seq(seq) => {
             for expr in &seq.exprs {
                 extract_resources_from_expr(expr, results);
             }
         }
-        swc_ecma_ast::Expr::Array(arr) => {
+        Expr::Array(arr) => {
             for elem in arr.elems.iter().flatten() {
                 extract_resources_from_expr(&elem.expr, results);
             }
         }
-        swc_ecma_ast::Expr::Object(obj) => {
+        Expr::Object(obj) => {
             for prop in &obj.props {
                 match prop {
-                    swc_ecma_ast::PropOrSpread::Prop(prop) => match &**prop {
-                        swc_ecma_ast::Prop::KeyValue(kv) => {
+                    PropOrSpread::Prop(prop) => match &**prop {
+                        Prop::KeyValue(kv) => {
                             extract_resources_from_expr(&kv.value, results);
                         }
-                        swc_ecma_ast::Prop::Assign(assign) => {
+                        Prop::Assign(assign) => {
                             extract_resources_from_expr(&assign.value, results);
                         }
                         _ => {}
                     },
-                    swc_ecma_ast::PropOrSpread::Spread(spread) => {
+                    PropOrSpread::Spread(spread) => {
                         extract_resources_from_expr(&spread.expr, results);
                     }
                 }
             }
         }
-        swc_ecma_ast::Expr::Arrow(arrow) => match &*arrow.body {
-            swc_ecma_ast::ArrowFunctionBody::FunctionBody(block) => {
+        Expr::Arrow(arrow) => match &*arrow.body {
+            ArrowFunctionBody::FunctionBody(block) => {
                 for stmt in &block.stmts {
                     extract_resources_from_stmt(stmt, results);
                 }
             }
-            swc_ecma_ast::ArrowFunctionBody::Expr(expr) => {
+            ArrowFunctionBody::Expr(expr) => {
                 extract_resources_from_expr(expr, results);
             }
         },
-        swc_ecma_ast::Expr::Fn(fn_expr) => {
+        Expr::Fn(fn_expr) => {
             if let Some(body) = &fn_expr.function.body {
                 for stmt in &body.stmts {
                     extract_resources_from_stmt(stmt, results);
                 }
             }
         }
-        swc_ecma_ast::Expr::Await(await_expr) => {
+        Expr::Await(await_expr) => {
             extract_resources_from_expr(&await_expr.arg, results);
         }
-        swc_ecma_ast::Expr::Yield(yield_expr) => {
+        Expr::Yield(yield_expr) => {
             if let Some(arg) = &yield_expr.arg {
                 extract_resources_from_expr(arg, results);
             }
         }
-        swc_ecma_ast::Expr::Assign(assign) => {
+        Expr::Assign(assign) => {
             extract_resources_from_expr(&assign.right, results);
         }
-        swc_ecma_ast::Expr::Update(update) => {
+        Expr::Update(update) => {
             extract_resources_from_expr(&update.arg, results);
         }
         _ => {}
@@ -1340,15 +1357,15 @@ fn extract_resources_from_expr(expr: &swc_ecma_ast::Expr, results: &mut Vec<Stri
 ///
 /// # Arguments
 ///
-/// - `&swc_ecma_ast::Stmt`: The statement to walk.
+/// - `&Stmt`: The statement to walk.
 /// - `&mut Vec<String>`: The collection to append discovered resource paths to.
-fn extract_resources_from_stmt(stmt: &swc_ecma_ast::Stmt, results: &mut Vec<String>) {
+fn extract_resources_from_stmt(stmt: &Stmt, results: &mut Vec<String>) {
     match stmt {
-        swc_ecma_ast::Stmt::Expr(expr_stmt) => {
+        Stmt::Expr(expr_stmt) => {
             extract_resources_from_expr(&expr_stmt.expr, results);
         }
-        swc_ecma_ast::Stmt::Decl(decl) => {
-            if let swc_ecma_ast::Decl::Var(var_decl) = decl {
+        Stmt::Decl(decl) => {
+            if let Decl::Var(var_decl) = decl {
                 for declarator in &var_decl.decls {
                     if let Some(init) = &declarator.init {
                         extract_resources_from_expr(init, results);
@@ -1356,29 +1373,29 @@ fn extract_resources_from_stmt(stmt: &swc_ecma_ast::Stmt, results: &mut Vec<Stri
                 }
             }
         }
-        swc_ecma_ast::Stmt::Block(block) => {
+        Stmt::Block(block) => {
             for stmt in &block.stmts {
                 extract_resources_from_stmt(stmt, results);
             }
         }
-        swc_ecma_ast::Stmt::If(if_stmt) => {
+        Stmt::If(if_stmt) => {
             extract_resources_from_expr(&if_stmt.test, results);
             extract_resources_from_stmt(&if_stmt.cons, results);
             if let Some(alt) = &if_stmt.alt {
                 extract_resources_from_stmt(alt, results);
             }
         }
-        swc_ecma_ast::Stmt::For(for_stmt) => {
+        Stmt::For(for_stmt) => {
             if let Some(init) = &for_stmt.init {
                 match init {
-                    swc_ecma_ast::VarDeclOrExpr::VarDecl(var_decl) => {
+                    VarDeclOrExpr::VarDecl(var_decl) => {
                         for declarator in &var_decl.decls {
                             if let Some(init) = &declarator.init {
                                 extract_resources_from_expr(init, results);
                             }
                         }
                     }
-                    swc_ecma_ast::VarDeclOrExpr::Expr(expr) => {
+                    VarDeclOrExpr::Expr(expr) => {
                         extract_resources_from_expr(expr, results);
                     }
                 }
@@ -1391,23 +1408,23 @@ fn extract_resources_from_stmt(stmt: &swc_ecma_ast::Stmt, results: &mut Vec<Stri
             }
             extract_resources_from_stmt(&for_stmt.body, results);
         }
-        swc_ecma_ast::Stmt::While(while_stmt) => {
+        Stmt::While(while_stmt) => {
             extract_resources_from_expr(&while_stmt.test, results);
             extract_resources_from_stmt(&while_stmt.body, results);
         }
-        swc_ecma_ast::Stmt::DoWhile(do_while) => {
+        Stmt::DoWhile(do_while) => {
             extract_resources_from_stmt(&do_while.body, results);
             extract_resources_from_expr(&do_while.test, results);
         }
-        swc_ecma_ast::Stmt::Return(return_stmt) => {
+        Stmt::Return(return_stmt) => {
             if let Some(arg) = &return_stmt.arg {
                 extract_resources_from_expr(arg, results);
             }
         }
-        swc_ecma_ast::Stmt::Throw(throw_stmt) => {
+        Stmt::Throw(throw_stmt) => {
             extract_resources_from_expr(&throw_stmt.arg, results);
         }
-        swc_ecma_ast::Stmt::Try(try_stmt) => {
+        Stmt::Try(try_stmt) => {
             for stmt in &try_stmt.block.stmts {
                 extract_resources_from_stmt(stmt, results);
             }
@@ -1422,7 +1439,7 @@ fn extract_resources_from_stmt(stmt: &swc_ecma_ast::Stmt, results: &mut Vec<Stri
                 }
             }
         }
-        swc_ecma_ast::Stmt::Switch(switch_stmt) => {
+        Stmt::Switch(switch_stmt) => {
             extract_resources_from_expr(&switch_stmt.discriminant, results);
             for case in &switch_stmt.cases {
                 if let Some(test) = &case.test {
@@ -1433,7 +1450,7 @@ fn extract_resources_from_stmt(stmt: &swc_ecma_ast::Stmt, results: &mut Vec<Stri
                 }
             }
         }
-        swc_ecma_ast::Stmt::Labeled(labeled) => {
+        Stmt::Labeled(labeled) => {
             extract_resources_from_stmt(&labeled.body, results);
         }
         _ => {}
@@ -1443,9 +1460,9 @@ fn extract_resources_from_stmt(stmt: &swc_ecma_ast::Stmt, results: &mut Vec<Stri
 /// Parses inline JavaScript with SWC and extracts string literals that look
 /// like resource paths.
 ///
-/// Uses `swc_ecma_parser::parse_file_as_program` to parse the script content,
-/// then recursively walks the AST to find all string literals ending in
-/// known resource extensions (`.wasm`, `.js`, `.css`, `.png`, `.jpg`, etc.).
+/// Uses `parse_file_as_program` to parse the script content, then recursively
+/// walks the AST to find all string literals ending in known resource
+/// extensions (see `RESOURCE_EXTENSIONS`).
 ///
 /// # Arguments
 ///
@@ -1453,7 +1470,7 @@ fn extract_resources_from_stmt(stmt: &swc_ecma_ast::Stmt, results: &mut Vec<Stri
 /// - `&mut Vec<String>`: The collection to append discovered resource paths to.
 fn extract_resources_from_js_ast(js: &str, results: &mut Vec<String>) {
     let source_map: SourceMap = SourceMap::default();
-    let source_file = source_map.new_source_file(swc_common::FileName::Anon.into(), js.to_string());
+    let source_file = source_map.new_source_file(FileName::Anon.into(), js.to_string());
     let comments = SingleThreadedComments::default();
     let mut recovered_errors = Vec::new();
     let program: Result<Program, _> = parse_file_as_program(
@@ -1468,9 +1485,9 @@ fn extract_resources_from_js_ast(js: &str, results: &mut Vec<String>) {
             Program::Module(module) => {
                 for item in module.body {
                     match item {
-                        swc_ecma_ast::ModuleItem::ModuleDecl(module_decl) => {
-                            if let swc_ecma_ast::ModuleDecl::ExportDecl(export_decl) = module_decl {
-                                if let swc_ecma_ast::Decl::Var(var_decl) = export_decl.decl {
+                        ModuleItem::ModuleDecl(module_decl) => {
+                            if let ModuleDecl::ExportDecl(export_decl) = module_decl {
+                                if let Decl::Var(var_decl) = export_decl.decl {
                                     for declarator in var_decl.decls {
                                         if let Some(init) = declarator.init {
                                             extract_resources_from_expr(&init, results);
@@ -1479,7 +1496,7 @@ fn extract_resources_from_js_ast(js: &str, results: &mut Vec<String>) {
                                 }
                             }
                         }
-                        swc_ecma_ast::ModuleItem::Stmt(stmt) => {
+                        ModuleItem::Stmt(stmt) => {
                             extract_resources_from_stmt(&stmt, results);
                         }
                     }
@@ -1497,9 +1514,9 @@ fn extract_resources_from_js_ast(js: &str, results: &mut Vec<String>) {
 /// Checks whether a string value looks like a local resource path that should
 /// be cached.
 ///
-/// Accepts paths ending in common web resource extensions (`.wasm`, `.js`,
-/// `.mjs`, `.css`, `.json`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.ico`,
-/// `.woff`, `.woff2`, `.ttf`, `.otf`, `.webp`) that do not contain `://`.
+/// Accepts paths ending in common web resource extensions (see
+/// `RESOURCE_EXTENSIONS`) that do not contain an absolute URL authority
+/// (`SCHEME_SEPARATOR`) and are not protocol-relative or inline-data URIs.
 ///
 /// # Arguments
 ///
@@ -1509,25 +1526,15 @@ fn extract_resources_from_js_ast(js: &str, results: &mut Vec<String>) {
 ///
 /// - `bool`: `true` if the value looks like a local resource path.
 fn is_resource_path(value: &str) -> bool {
-    if value.contains("://") || value.starts_with("data:") || value.starts_with("//") {
+    if value.contains(SCHEME_SEPARATOR)
+        || value.starts_with(DATA_PREFIX)
+        || value.starts_with(SCHEME_RELATIVE)
+    {
         return false;
     }
-    value.ends_with(".wasm")
-        || value.ends_with(".js")
-        || value.ends_with(".mjs")
-        || value.ends_with(".css")
-        || value.ends_with(".json")
-        || value.ends_with(".png")
-        || value.ends_with(".jpg")
-        || value.ends_with(".jpeg")
-        || value.ends_with(".gif")
-        || value.ends_with(".svg")
-        || value.ends_with(".ico")
-        || value.ends_with(".woff")
-        || value.ends_with(".woff2")
-        || value.ends_with(".ttf")
-        || value.ends_with(".otf")
-        || value.ends_with(".webp")
+    RESOURCE_EXTENSIONS
+        .iter()
+        .any(|suffix: &&str| value.ends_with(*suffix))
 }
 
 /// Extracts a single-quoted or double-quoted value from the beginning of a string.
