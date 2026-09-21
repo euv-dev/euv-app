@@ -724,15 +724,11 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
         .map_err(|error: std::io::Error| CacheError::Write(error.to_string()))?;
     atomic_write(&version_dir.join("index.html"), html.as_bytes()).await?;
     let mut expected_paths: Vec<String> = Vec::new();
-    extract_attr_values(&html, "script", "src", &mut expected_paths);
-    extract_attr_values(&html, "link", "href", &mut expected_paths);
-    extract_attr_values(&html, "img", "src", &mut expected_paths);
-    extract_module_imports(&html, &mut expected_paths);
-    // IIFE inline-bridge format (euv PR #250): the HTML contains no external
-    // <script src> or <link href> tags, but the inline JS sets
-    // `var __euv_wasm_url = "pkg/<name>_bg.wasm"`.  Extract that URL so the
-    // wasm binary is fetched into the cache alongside the HTML.
-    extract_iife_wasm_url(&html, &mut expected_paths);
+    let mut inline_scripts: Vec<String> = Vec::new();
+    extract_resources_with_scraper(&html, &mut expected_paths, &mut inline_scripts);
+    for script in &inline_scripts {
+        extract_resources_from_js_ast(script, &mut expected_paths);
+    }
     expected_paths.retain(|p: &String| {
         !p.starts_with("http://")
             && !p.starts_with("https://")
@@ -785,7 +781,7 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
         let js_path: PathBuf = version_dir.join(js_rel);
         if let Ok(js_content) = read_to_string(&js_path).await {
             let mut raw_refs: Vec<String> = Vec::new();
-            extract_wasm_references(&js_content, &mut raw_refs);
+            extract_resources_from_js_ast(&js_content, &mut raw_refs);
             // Map each raw reference to its local cache path relative to the JS
             // file's directory, so it matches where the resource was stored.
             for raw_ref in &raw_refs {
@@ -885,13 +881,11 @@ fn derive_base_url(final_url: &str) -> String {
 /// - `usize`: The total number of resources successfully fetched.
 async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str) -> usize {
     let mut paths: Vec<String> = Vec::new();
-    extract_attr_values(html, "script", "src", &mut paths);
-    extract_attr_values(html, "link", "href", &mut paths);
-    extract_attr_values(html, "img", "src", &mut paths);
-    extract_module_imports(html, &mut paths);
-    // IIFE inline-bridge format (euv PR #250): no external <script src>, but
-    // the inline JS sets `var __euv_wasm_url = "pkg/<name>_bg.wasm"`.
-    extract_iife_wasm_url(html, &mut paths);
+    let mut inline_scripts: Vec<String> = Vec::new();
+    extract_resources_with_scraper(html, &mut paths, &mut inline_scripts);
+    for script in &inline_scripts {
+        extract_resources_from_js_ast(script, &mut paths);
+    }
     let base_url: String = derive_base_url(final_url);
     euv_log!("[EUV] resource base URL: {}", base_url);
     let fetched: FetchResult = fetch_resource_list(&paths, &base_url, version_dir).await;
@@ -908,8 +902,7 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str)
         if clean_path.ends_with(".js") || clean_path.ends_with(".mjs") {
             let js_content: String = String::from_utf8_lossy(data).to_string();
             let mut refs: Vec<String> = Vec::new();
-            extract_wasm_references(&js_content, &mut refs);
-            extract_module_imports(&js_content, &mut refs);
+            extract_resources_from_js_ast(&js_content, &mut refs);
             for raw_ref in &refs {
                 if raw_ref.starts_with("data:")
                     || raw_ref.starts_with("http://")
@@ -1155,222 +1148,386 @@ async fn fetch_resource_list(paths: &[String], base_url: &str, version_dir: &Pat
     results
 }
 
-/// Extracts WASM file references from JavaScript source code.
+/// Extracts resource paths from HTML using the scraper HTML parser.
 ///
-/// Returns the raw references exactly as written in the source. The caller is
-/// responsible for resolving them against the JS file's final URL (download)
-/// and directory (local cache path).
-///
-/// # Arguments
-///
-/// - `&str`: The JavaScript source code.
-/// - `&mut Vec<String>`: The collection to append discovered WASM paths to.
-fn extract_wasm_references(js: &str, results: &mut Vec<String>) {
-    let mut pos: usize = 0;
-    while pos < js.len() {
-        let index: usize = match js[pos..].find(".wasm") {
-            Some(offset) => pos + offset,
-            None => break,
-        };
-        let search_start: usize = index.saturating_sub(60);
-        let before: &str = &js[search_start..index];
-        let wasm_ref: Option<&str> = before
-            .rfind('\'')
-            .map(|q: usize| &js[search_start + q + 1..index + 5])
-            .or_else(|| {
-                before
-                    .rfind('"')
-                    .map(|q: usize| &js[search_start + q + 1..index + 5])
-            });
-        if let Some(wasm_file) = wasm_ref
-            && !wasm_file.contains("://")
-            && !wasm_file.contains(' ')
-        {
-            // Return the raw reference exactly as written in the JS source. The
-            // caller resolves it against the JS file's final URL (for the
-            // download URL) and against the JS file's directory (for the local
-            // cache path), so prefixing the JS directory here would double it.
-            let raw: String = wasm_file.to_string();
-            if !results.contains(&raw) {
-                results.push(raw);
-            }
-        }
-        pos = index + 5;
-    }
-}
-
-/// Extracts ES module import paths from source code.
-///
-/// Looks for `import ... from '...'` and dynamic `import('...')` patterns.
-/// Supports destructured imports like `import init, { main } from './pkg/euv.js'`
-/// and bare relative paths that do not start with `./` or `../` but contain a `/`.
+/// Parses `<script src>`, `<link href>`, and `<img src>` tags to discover
+/// external resources.  Also collects inline `<script>` bodies for further
+/// AST-level analysis (e.g. IIFE inline-bridge wasm URLs).
 ///
 /// # Arguments
 ///
-/// - `&str`: The source code to parse.
-/// - `&mut Vec<String>`: The collection to append discovered import paths to.
-fn extract_module_imports(source: &str, results: &mut Vec<String>) {
-    let mut pos: usize = 0;
-    while pos < source.len() {
-        let index: usize = match source[pos..].find("from") {
-            Some(offset) => pos + offset,
-            None => break,
-        };
-        let before: &str = &source[pos..index];
-        let is_import_context: bool = before
-            .trim_end()
-            .trim_end_matches(',')
-            .trim_end_matches('}')
-            .trim_end_matches('{')
-            .trim_end_matches(',')
-            .ends_with("import")
-            || before.trim_end().ends_with("import")
-            || before.rfind("import").is_some_and(|import_pos: usize| {
-                let after_import: &str = before[import_pos + 6..].trim();
-                after_import.is_empty()
-                    || after_import.chars().all(|c: char| {
-                        c.is_alphanumeric()
-                            || c == '_'
-                            || c == '{'
-                            || c == '}'
-                            || c == ','
-                            || c == '*'
-                            || c == ' '
-                            || c == '\t'
-                            || c == '\n'
-                            || c == '\r'
-                    })
-            });
-        if is_import_context {
-            let after: &str = source[index + 4..].trim_start();
-            let value: &str = extract_quoted_value(after);
-            if !value.is_empty()
-                && is_relative_resource_path(value)
-                && !results.contains(&value.to_string())
+/// - `&str`: The HTML content to parse.
+/// - `&mut Vec<String>`: The collection to append discovered resource paths to.
+/// - `&mut Vec<String>`: The collection to append inline script contents to.
+fn extract_resources_with_scraper(
+    html: &str,
+    paths: &mut Vec<String>,
+    inline_scripts: &mut Vec<String>,
+) {
+    let document: Html = Html::parse_document(html);
+    let script_selector: Selector = Selector::parse("script[src]").unwrap();
+    let link_selector: Selector = Selector::parse("link[href]").unwrap();
+    let img_selector: Selector = Selector::parse("img[src]").unwrap();
+    let inline_script_selector: Selector = Selector::parse("script:not([src])").unwrap();
+    for element in document.select(&script_selector) {
+        if let Some(src) = element.value().attr("src") {
+            if !src.starts_with("http://")
+                && !src.starts_with("https://")
+                && !src.starts_with("//")
+                && !src.starts_with("data:")
+                && !paths.contains(&src.to_string())
             {
-                results.push(value.to_string());
+                paths.push(src.to_string());
             }
         }
-        pos = index + 4;
+    }
+    for element in document.select(&link_selector) {
+        if let Some(href) = element.value().attr("href") {
+            if !href.starts_with("http://")
+                && !href.starts_with("https://")
+                && !href.starts_with("//")
+                && !href.starts_with("data:")
+                && !paths.contains(&href.to_string())
+            {
+                paths.push(href.to_string());
+            }
+        }
+    }
+    for element in document.select(&img_selector) {
+        if let Some(src) = element.value().attr("src") {
+            if !src.starts_with("http://")
+                && !src.starts_with("https://")
+                && !src.starts_with("//")
+                && !src.starts_with("data:")
+                && !paths.contains(&src.to_string())
+            {
+                paths.push(src.to_string());
+            }
+        }
+    }
+    for element in document.select(&inline_script_selector) {
+        let script_content: String = element.text().collect::<String>();
+        if !script_content.trim().is_empty() {
+            inline_scripts.push(script_content);
+        }
     }
 }
 
-/// Checks whether a path string refers to a relative resource that should be cached.
-///
-/// Accepts paths starting with `./` or `../`, as well as bare relative paths
-/// that contain a `/` and do not look like an npm package name.
+/// Recursively walks an SWC AST expression to find string literals that look
+/// like resource paths (`.wasm`, `.js`, `.css`, `.png`, etc.).
 ///
 /// # Arguments
 ///
-/// - `&str`: The path string to evaluate.
+/// - `&swc_ecma_ast::Expr`: The expression to walk.
+/// - `&mut Vec<String>`: The collection to append discovered resource paths to.
+fn extract_resources_from_expr(expr: &swc_ecma_ast::Expr, results: &mut Vec<String>) {
+    match expr {
+        swc_ecma_ast::Expr::Lit(lit) => {
+            if let swc_ecma_ast::Lit::Str(str_lit) = lit {
+                let value: String = str_lit.value.to_string_lossy().into_owned();
+                if is_resource_path(&value) && !results.contains(&value) {
+                    results.push(value);
+                }
+            }
+        }
+        swc_ecma_ast::Expr::Call(call) => {
+            for arg in &call.args {
+                extract_resources_from_expr(&arg.expr, results);
+            }
+            if let swc_ecma_ast::Callee::Expr(callee_expr) = &call.callee {
+                extract_resources_from_expr(callee_expr, results);
+            }
+        }
+        swc_ecma_ast::Expr::New(new_expr) => {
+            if let Some(args) = &new_expr.args {
+                for arg in args {
+                    extract_resources_from_expr(&arg.expr, results);
+                }
+            }
+            extract_resources_from_expr(&new_expr.callee, results);
+        }
+        swc_ecma_ast::Expr::Member(member) => {
+            extract_resources_from_expr(&member.obj, results);
+            if let swc_ecma_ast::MemberProp::Computed(computed) = &member.prop {
+                extract_resources_from_expr(&computed.expr, results);
+            }
+        }
+        swc_ecma_ast::Expr::Bin(bin) => {
+            extract_resources_from_expr(&bin.left, results);
+            extract_resources_from_expr(&bin.right, results);
+        }
+        swc_ecma_ast::Expr::Unary(unary) => {
+            extract_resources_from_expr(&unary.arg, results);
+        }
+        swc_ecma_ast::Expr::Paren(paren) => {
+            extract_resources_from_expr(&paren.expr, results);
+        }
+        swc_ecma_ast::Expr::Tpl(tpl) => {
+            for expr in &tpl.exprs {
+                extract_resources_from_expr(expr, results);
+            }
+        }
+        swc_ecma_ast::Expr::Cond(cond) => {
+            extract_resources_from_expr(&cond.test, results);
+            extract_resources_from_expr(&cond.cons, results);
+            extract_resources_from_expr(&cond.alt, results);
+        }
+        swc_ecma_ast::Expr::Seq(seq) => {
+            for expr in &seq.exprs {
+                extract_resources_from_expr(expr, results);
+            }
+        }
+        swc_ecma_ast::Expr::Array(arr) => {
+            for elem in arr.elems.iter().flatten() {
+                extract_resources_from_expr(&elem.expr, results);
+            }
+        }
+        swc_ecma_ast::Expr::Object(obj) => {
+            for prop in &obj.props {
+                match prop {
+                    swc_ecma_ast::PropOrSpread::Prop(prop) => match &**prop {
+                        swc_ecma_ast::Prop::KeyValue(kv) => {
+                            extract_resources_from_expr(&kv.value, results);
+                        }
+                        swc_ecma_ast::Prop::Assign(assign) => {
+                            extract_resources_from_expr(&assign.value, results);
+                        }
+                        _ => {}
+                    },
+                    swc_ecma_ast::PropOrSpread::Spread(spread) => {
+                        extract_resources_from_expr(&spread.expr, results);
+                    }
+                }
+            }
+        }
+        swc_ecma_ast::Expr::Arrow(arrow) => match &*arrow.body {
+            swc_ecma_ast::BlockStmtOrExpr::BlockStmt(block) => {
+                for stmt in &block.stmts {
+                    extract_resources_from_stmt(stmt, results);
+                }
+            }
+            swc_ecma_ast::BlockStmtOrExpr::Expr(expr) => {
+                extract_resources_from_expr(expr, results);
+            }
+        },
+        swc_ecma_ast::Expr::Fn(fn_expr) => {
+            if let Some(body) = &fn_expr.function.body {
+                for stmt in &body.stmts {
+                    extract_resources_from_stmt(stmt, results);
+                }
+            }
+        }
+        swc_ecma_ast::Expr::Await(await_expr) => {
+            extract_resources_from_expr(&await_expr.arg, results);
+        }
+        swc_ecma_ast::Expr::Yield(yield_expr) => {
+            if let Some(arg) = &yield_expr.arg {
+                extract_resources_from_expr(arg, results);
+            }
+        }
+        swc_ecma_ast::Expr::Assign(assign) => {
+            extract_resources_from_expr(&assign.right, results);
+        }
+        swc_ecma_ast::Expr::Update(update) => {
+            extract_resources_from_expr(&update.arg, results);
+        }
+        _ => {}
+    }
+}
+
+/// Recursively walks an SWC AST statement to find string literals that look
+/// like resource paths.
+///
+/// # Arguments
+///
+/// - `&swc_ecma_ast::Stmt`: The statement to walk.
+/// - `&mut Vec<String>`: The collection to append discovered resource paths to.
+fn extract_resources_from_stmt(stmt: &swc_ecma_ast::Stmt, results: &mut Vec<String>) {
+    match stmt {
+        swc_ecma_ast::Stmt::Expr(expr_stmt) => {
+            extract_resources_from_expr(&expr_stmt.expr, results);
+        }
+        swc_ecma_ast::Stmt::Decl(decl) => {
+            if let swc_ecma_ast::Decl::Var(var_decl) = decl {
+                for declarator in &var_decl.decls {
+                    if let Some(init) = &declarator.init {
+                        extract_resources_from_expr(init, results);
+                    }
+                }
+            }
+        }
+        swc_ecma_ast::Stmt::Block(block) => {
+            for stmt in &block.stmts {
+                extract_resources_from_stmt(stmt, results);
+            }
+        }
+        swc_ecma_ast::Stmt::If(if_stmt) => {
+            extract_resources_from_expr(&if_stmt.test, results);
+            extract_resources_from_stmt(&if_stmt.cons, results);
+            if let Some(alt) = &if_stmt.alt {
+                extract_resources_from_stmt(alt, results);
+            }
+        }
+        swc_ecma_ast::Stmt::For(for_stmt) => {
+            if let Some(init) = &for_stmt.init {
+                match init {
+                    swc_ecma_ast::VarDeclOrExpr::VarDecl(var_decl) => {
+                        for declarator in &var_decl.decls {
+                            if let Some(init) = &declarator.init {
+                                extract_resources_from_expr(init, results);
+                            }
+                        }
+                    }
+                    swc_ecma_ast::VarDeclOrExpr::Expr(expr) => {
+                        extract_resources_from_expr(expr, results);
+                    }
+                }
+            }
+            if let Some(test) = &for_stmt.test {
+                extract_resources_from_expr(test, results);
+            }
+            if let Some(update) = &for_stmt.update {
+                extract_resources_from_expr(update, results);
+            }
+            extract_resources_from_stmt(&for_stmt.body, results);
+        }
+        swc_ecma_ast::Stmt::While(while_stmt) => {
+            extract_resources_from_expr(&while_stmt.test, results);
+            extract_resources_from_stmt(&while_stmt.body, results);
+        }
+        swc_ecma_ast::Stmt::DoWhile(do_while) => {
+            extract_resources_from_stmt(&do_while.body, results);
+            extract_resources_from_expr(&do_while.test, results);
+        }
+        swc_ecma_ast::Stmt::Return(return_stmt) => {
+            if let Some(arg) = &return_stmt.arg {
+                extract_resources_from_expr(arg, results);
+            }
+        }
+        swc_ecma_ast::Stmt::Throw(throw_stmt) => {
+            extract_resources_from_expr(&throw_stmt.arg, results);
+        }
+        swc_ecma_ast::Stmt::Try(try_stmt) => {
+            for stmt in &try_stmt.block.stmts {
+                extract_resources_from_stmt(stmt, results);
+            }
+            if let Some(handler) = &try_stmt.handler {
+                for stmt in &handler.body.stmts {
+                    extract_resources_from_stmt(stmt, results);
+                }
+            }
+            if let Some(finalizer) = &try_stmt.finalizer {
+                for stmt in &finalizer.stmts {
+                    extract_resources_from_stmt(stmt, results);
+                }
+            }
+        }
+        swc_ecma_ast::Stmt::Switch(switch_stmt) => {
+            extract_resources_from_expr(&switch_stmt.discriminant, results);
+            for case in &switch_stmt.cases {
+                if let Some(test) = &case.test {
+                    extract_resources_from_expr(test, results);
+                }
+                for stmt in &case.cons {
+                    extract_resources_from_stmt(stmt, results);
+                }
+            }
+        }
+        swc_ecma_ast::Stmt::Labeled(labeled) => {
+            extract_resources_from_stmt(&labeled.body, results);
+        }
+        _ => {}
+    }
+}
+
+/// Parses inline JavaScript with SWC and extracts string literals that look
+/// like resource paths.
+///
+/// Uses `swc_ecma_parser::parse_file_as_program` to parse the script content,
+/// then recursively walks the AST to find all string literals ending in
+/// known resource extensions (`.wasm`, `.js`, `.css`, `.png`, `.jpg`, etc.).
+///
+/// # Arguments
+///
+/// - `&str`: The JavaScript source code to parse.
+/// - `&mut Vec<String>`: The collection to append discovered resource paths to.
+fn extract_resources_from_js_ast(js: &str, results: &mut Vec<String>) {
+    let source_map: SourceMap = SourceMap::default();
+    let source_file = source_map.new_source_file(swc_common::FileName::Anon.into(), js.to_string());
+    let comments = SingleThreadedComments::default();
+    let mut recovered_errors = Vec::new();
+    let program: Result<Program, _> = parse_file_as_program(
+        &source_file,
+        Syntax::Es(Default::default()),
+        EsVersion::Es2022,
+        Some(&comments),
+        &mut recovered_errors,
+    );
+    if let Ok(program) = program {
+        match program {
+            Program::Module(module) => {
+                for item in module.body {
+                    match item {
+                        swc_ecma_ast::ModuleItem::ModuleDecl(module_decl) => {
+                            if let swc_ecma_ast::ModuleDecl::ExportDecl(export_decl) = module_decl {
+                                if let swc_ecma_ast::Decl::Var(var_decl) = export_decl.decl {
+                                    for declarator in var_decl.decls {
+                                        if let Some(init) = declarator.init {
+                                            extract_resources_from_expr(&init, results);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        swc_ecma_ast::ModuleItem::Stmt(stmt) => {
+                            extract_resources_from_stmt(&stmt, results);
+                        }
+                    }
+                }
+            }
+            Program::Script(script) => {
+                for stmt in script.body {
+                    extract_resources_from_stmt(&stmt, results);
+                }
+            }
+        }
+    }
+}
+
+/// Checks whether a string value looks like a local resource path that should
+/// be cached.
+///
+/// Accepts paths ending in common web resource extensions (`.wasm`, `.js`,
+/// `.mjs`, `.css`, `.json`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.ico`,
+/// `.woff`, `.woff2`, `.ttf`, `.otf`, `.webp`) that do not contain `://`.
+///
+/// # Arguments
+///
+/// - `&str`: The string value to evaluate.
 ///
 /// # Returns
 ///
-/// - `bool`: `true` if the path is a relative resource path, `false` otherwise.
-fn is_relative_resource_path(value: &str) -> bool {
-    if value.starts_with("./") || value.starts_with("../") {
-        return true;
+/// - `bool`: `true` if the value looks like a local resource path.
+fn is_resource_path(value: &str) -> bool {
+    if value.contains("://") || value.starts_with("data:") || value.starts_with("//") {
+        return false;
     }
-    if value.contains('/') && !value.contains("://") && !value.starts_with('@') {
-        return true;
-    }
-    if value.ends_with(".wasm")
+    value.ends_with(".wasm")
         || value.ends_with(".js")
         || value.ends_with(".mjs")
         || value.ends_with(".css")
-    {
-        return !value.contains("://");
-    }
-    false
-}
-
-/// Extracts attribute values from HTML tags matching the specified tag and attribute name.
-///
-/// Performs case-insensitive matching without allocating a new `String` for `to_lowercase()`
-/// by comparing only the tag and attribute patterns in lowercase.
-///
-/// # Arguments
-///
-/// - `&str`: The HTML content to parse.
-/// - `&str`: The tag name to search for (e.g., `"script"`, `"link"`).
-/// - `&str`: The attribute name to extract (e.g., `"src"`, `"href"`).
-/// - `&mut Vec<String>`: The collection to append discovered attribute values to.
-fn extract_attr_values(html: &str, tag: &str, attr: &str, results: &mut Vec<String>) {
-    let tag_lower: String = tag.to_lowercase();
-    let attr_lower: String = attr.to_lowercase();
-    let tag_prefix: String = format!("<{}", tag_lower);
-    let attr_eq: String = format!("{}=", attr_lower);
-    let close_tag: String = format!("</{}", tag_lower);
-    let mut pos: usize = 0;
-    while pos < html.len() {
-        let start: usize = match html[pos..].find(tag_prefix.as_str()) {
-            Some(offset) => pos + offset,
-            None => break,
-        };
-        let end: usize = match html[start..].find('>') {
-            Some(offset) => start + offset,
-            None => break,
-        };
-        let content: &str = &html[start..end];
-        if let Some(attr_position) = content.to_lowercase().find(attr_eq.as_str()) {
-            let value: &str = extract_quoted_value(&content[attr_position + attr_eq.len()..]);
-            if !value.is_empty() && !results.contains(&value.to_string()) {
-                results.push(value.to_string());
-            }
-        }
-        if content.to_lowercase().contains("type=\"module\"")
-            || content.to_lowercase().contains("type='module'")
-        {
-            let inner_end: usize = match html[end + 1..].find(close_tag.as_str()) {
-                Some(offset) => end + 1 + offset,
-                None => {
-                    pos = end + 1;
-                    continue;
-                }
-            };
-            let inner_html: &str = &html[end + 1..inner_end];
-            extract_module_imports(inner_html, results);
-            pos = inner_end;
-        } else {
-            pos = end + 1;
-        }
-    }
-}
-
-/// Extracts the wasm URL from an IIFE inline-bridge HTML payload.
-///
-/// euv PR #250 replaced the external `pkg/<name>.js` module script with an
-/// inline IIFE that hardcodes the wasm URL as
-/// `var __euv_wasm_url = "pkg/<name>_bg.wasm"`.  When the HTML contains no
-/// external `<script src>` or `<link href>` tags, this extractor finds the
-/// wasm path so it can be fetched into the cache alongside the HTML.
-///
-/// # Arguments
-///
-/// - `&str`: The HTML content to parse.
-/// - `&mut Vec<String>`: The collection to append the discovered wasm path to.
-fn extract_iife_wasm_url(html: &str, results: &mut Vec<String>) {
-    let marker: &str = "__euv_wasm_url";
-    let mut pos: usize = 0;
-    while pos < html.len() {
-        let index: usize = match html[pos..].find(marker) {
-            Some(offset) => pos + offset,
-            None => break,
-        };
-        let after: &str = html[index + marker.len()..].trim_start();
-        let after_eq: &str = after
-            .strip_prefix('=')
-            .map_or(after, |s: &str| s.trim_start());
-        let value: &str = extract_quoted_value(after_eq);
-        if !value.is_empty()
-            && value.ends_with(".wasm")
-            && !value.contains("://")
-            && !results.contains(&value.to_string())
-        {
-            results.push(value.to_string());
-        }
-        pos = index + marker.len();
-    }
+        || value.ends_with(".json")
+        || value.ends_with(".png")
+        || value.ends_with(".jpg")
+        || value.ends_with(".jpeg")
+        || value.ends_with(".gif")
+        || value.ends_with(".svg")
+        || value.ends_with(".ico")
+        || value.ends_with(".woff")
+        || value.ends_with(".woff2")
+        || value.ends_with(".ttf")
+        || value.ends_with(".otf")
+        || value.ends_with(".webp")
 }
 
 /// Extracts a single-quoted or double-quoted value from the beginning of a string.

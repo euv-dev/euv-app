@@ -21,7 +21,11 @@ pub(crate) use std::{
 pub(crate) use {
     lombok_macros::*,
     reqwest::Client,
+    scraper::{Html, Selector},
     serde::{Serialize, Serializer},
+    swc_common::{SourceMap, comments::SingleThreadedComments},
+    swc_ecma_ast::{EsVersion, Program},
+    swc_ecma_parser::{Syntax, parse_file_as_program},
     tauri::{
         App, AppHandle, Builder, Manager, RunEvent, UriSchemeResponder, Webview,
         async_runtime::spawn,
