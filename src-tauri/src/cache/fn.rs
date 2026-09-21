@@ -274,7 +274,10 @@ fn inject_page_scripts(webview: &Webview, payload: &PageLoadPayload<'_>) {
         euv_log!("[EUV] failed to inject link interceptor: {}", error);
     }
     if let Err(error) = webview.eval(IMMERSIVE_SAFE_AREA_SCRIPT) {
-        euv_log!("[EUV] failed to inject immersive safe-area script: {}", error);
+        euv_log!(
+            "[EUV] failed to inject immersive safe-area script: {}",
+            error
+        );
     }
 }
 
@@ -720,18 +723,23 @@ async fn fetch_full_snapshot(cache_root: &Path) -> Result<String, CacheError> {
         .await
         .map_err(|error: std::io::Error| CacheError::Write(error.to_string()))?;
     atomic_write(&version_dir.join("index.html"), html.as_bytes()).await?;
-    let resource_count: usize = fetch_linked_resources(&version_dir, &html, &final_url).await;
     let mut expected_paths: Vec<String> = Vec::new();
     extract_attr_values(&html, "script", "src", &mut expected_paths);
     extract_attr_values(&html, "link", "href", &mut expected_paths);
     extract_attr_values(&html, "img", "src", &mut expected_paths);
     extract_module_imports(&html, &mut expected_paths);
+    // IIFE inline-bridge format (euv PR #250): the HTML contains no external
+    // <script src> or <link href> tags, but the inline JS sets
+    // `var __euv_wasm_url = "pkg/<name>_bg.wasm"`.  Extract that URL so the
+    // wasm binary is fetched into the cache alongside the HTML.
+    extract_iife_wasm_url(&html, &mut expected_paths);
     expected_paths.retain(|p: &String| {
         !p.starts_with("http://")
             && !p.starts_with("https://")
             && !p.starts_with("//")
             && !p.starts_with("data:")
     });
+    let resource_count: usize = fetch_linked_resources(&version_dir, &html, &final_url).await;
     if resource_count == 0 && !expected_paths.is_empty() {
         remove_dir_all(&version_dir).await.ok();
         return Err(CacheError::Fetch(
@@ -881,6 +889,9 @@ async fn fetch_linked_resources(version_dir: &Path, html: &str, final_url: &str)
     extract_attr_values(html, "link", "href", &mut paths);
     extract_attr_values(html, "img", "src", &mut paths);
     extract_module_imports(html, &mut paths);
+    // IIFE inline-bridge format (euv PR #250): no external <script src>, but
+    // the inline JS sets `var __euv_wasm_url = "pkg/<name>_bg.wasm"`.
+    extract_iife_wasm_url(html, &mut paths);
     let base_url: String = derive_base_url(final_url);
     euv_log!("[EUV] resource base URL: {}", base_url);
     let fetched: FetchResult = fetch_resource_list(&paths, &base_url, version_dir).await;
@@ -1323,6 +1334,42 @@ fn extract_attr_values(html: &str, tag: &str, attr: &str, results: &mut Vec<Stri
         } else {
             pos = end + 1;
         }
+    }
+}
+
+/// Extracts the wasm URL from an IIFE inline-bridge HTML payload.
+///
+/// euv PR #250 replaced the external `pkg/<name>.js` module script with an
+/// inline IIFE that hardcodes the wasm URL as
+/// `var __euv_wasm_url = "pkg/<name>_bg.wasm"`.  When the HTML contains no
+/// external `<script src>` or `<link href>` tags, this extractor finds the
+/// wasm path so it can be fetched into the cache alongside the HTML.
+///
+/// # Arguments
+///
+/// - `&str`: The HTML content to parse.
+/// - `&mut Vec<String>`: The collection to append the discovered wasm path to.
+fn extract_iife_wasm_url(html: &str, results: &mut Vec<String>) {
+    let marker: &str = "__euv_wasm_url";
+    let mut pos: usize = 0;
+    while pos < html.len() {
+        let index: usize = match html[pos..].find(marker) {
+            Some(offset) => pos + offset,
+            None => break,
+        };
+        let after: &str = html[index + marker.len()..].trim_start();
+        let after_eq: &str = after
+            .strip_prefix('=')
+            .map_or(after, |s: &str| s.trim_start());
+        let value: &str = extract_quoted_value(after_eq);
+        if !value.is_empty()
+            && value.ends_with(".wasm")
+            && !value.contains("://")
+            && !results.contains(&value.to_string())
+        {
+            results.push(value.to_string());
+        }
+        pos = index + marker.len();
     }
 }
 
